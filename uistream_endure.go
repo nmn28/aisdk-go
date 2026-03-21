@@ -37,13 +37,13 @@ type UITitlePart struct {
 	ThreadID string `json:"threadId"`
 }
 
-func (p UITitlePart) UIStreamType() string { return "endure-title" }
+func (p UITitlePart) UIStreamType() string { return "data-endure-title" }
 func (p UITitlePart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type     string `json:"type"`
 		Title    string `json:"title"`
 		ThreadID string `json:"threadId"`
-	}{"endure-title", p.Title, p.ThreadID})
+	}{"data-endure-title", p.Title, p.ThreadID})
 }
 
 // FormatTitleEvent returns the raw "t:" format used by corapinew for
