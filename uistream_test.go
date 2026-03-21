@@ -350,7 +350,7 @@ func TestWithTitleInjection(t *testing.T) {
 		"text-start",
 		"text-delta",
 		"text-end",
-		"endure-title", // Title injected before finish
+		"data-endure-title", // Title injected before finish
 		"finish",
 		"[DONE]",
 	}, events)
@@ -400,13 +400,13 @@ func TestPipeEndureStream_FullIntegration(t *testing.T) {
 	body := w.Body.String()
 	lines := strings.Split(strings.TrimSpace(body), "\n\n")
 
-	// Should have: start, start-step, text-start, text-delta x2, text-end, finish-step, endure-title, finish, [DONE]
+	// Should have: start, start-step, text-start, text-delta x2, text-end, finish-step, data-endure-title, finish, [DONE]
 	assert.GreaterOrEqual(t, len(lines), 8)
 	assert.Contains(t, lines[0], `"type":"start"`)
 	assert.Contains(t, body, `"type":"text-delta"`)
 	assert.Contains(t, body, `"type":"text-start"`)
 	assert.Contains(t, body, `"type":"text-end"`)
-	assert.Contains(t, body, `"type":"endure-title"`)
+	assert.Contains(t, body, `"type":"data-endure-title"`)
 	assert.Contains(t, body, `"Weather chat"`)
 	assert.True(t, strings.HasSuffix(strings.TrimSpace(body), "data: [DONE]"))
 }

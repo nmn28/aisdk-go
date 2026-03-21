@@ -39,9 +39,9 @@ func (p UIStartPart) UIStreamJSON() ([]byte, error) {
 }
 
 // UIFinishPart signals the end of message generation.
+// AI SDK v6 strict schema: only type + finishReason + messageMetadata allowed.
 type UIFinishPart struct {
 	FinishReason FinishReason `json:"finishReason,omitempty"`
-	Usage        *Usage       `json:"usage,omitempty"`
 }
 
 func (p UIFinishPart) UIStreamType() string { return "finish" }
@@ -49,8 +49,7 @@ func (p UIFinishPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type         string       `json:"type"`
 		FinishReason FinishReason `json:"finishReason,omitempty"`
-		Usage        *Usage       `json:"usage,omitempty"`
-	}{"finish", p.FinishReason, p.Usage})
+	}{"finish", p.FinishReason})
 }
 
 // --- Text Streaming Events ---
@@ -252,20 +251,20 @@ func (p UIStartStepPart) UIStreamJSON() ([]byte, error) {
 }
 
 // UIFinishStepPart marks the end of a processing step.
+// AI SDK v6 strict schema: only { type: "finish-step" } allowed — no extra fields.
 type UIFinishStepPart struct {
-	FinishReason FinishReason `json:"finishReason,omitempty"`
-	Usage        *Usage       `json:"usage,omitempty"`
-	IsContinued  bool         `json:"isContinued,omitempty"`
+	// FinishReason and Usage are retained internally for the accumulator
+	// but NOT serialized to the wire format.
+	FinishReason FinishReason `json:"-"`
+	Usage        *Usage       `json:"-"`
+	IsContinued  bool         `json:"-"`
 }
 
 func (p UIFinishStepPart) UIStreamType() string { return "finish-step" }
 func (p UIFinishStepPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type         string       `json:"type"`
-		FinishReason FinishReason `json:"finishReason,omitempty"`
-		Usage        *Usage       `json:"usage,omitempty"`
-		IsContinued  bool         `json:"isContinued,omitempty"`
-	}{"finish-step", p.FinishReason, p.Usage, p.IsContinued})
+		Type string `json:"type"`
+	}{"finish-step"})
 }
 
 // --- Error Events ---
@@ -395,7 +394,6 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 		}
 
 		var lastFinishReason FinishReason
-		var lastUsage Usage
 
 		for part, err := range ds {
 			if err != nil {
@@ -512,7 +510,6 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 					return
 				}
 				lastFinishReason = p.FinishReason
-				lastUsage = p.Usage
 				if !yield(UIFinishStepPart{
 					FinishReason: p.FinishReason,
 					Usage:        &p.Usage,
@@ -526,7 +523,6 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 					return
 				}
 				lastFinishReason = p.FinishReason
-				lastUsage = p.Usage
 				// Don't emit finish here — we emit it after the loop
 				// to ensure it's always the last event before [DONE]
 
@@ -555,7 +551,6 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 		// Emit finish
 		if !yield(UIFinishPart{
 			FinishReason: lastFinishReason,
-			Usage:        &lastUsage,
 		}, nil) {
 			return
 		}
