@@ -29,6 +29,24 @@ type EndureStreamOptions struct {
 	StreamMode string
 }
 
+// UIStatusPart is a transient status indicator sent during streaming so the
+// frontend can show "Thinking..." / "Searching..." UI.  It uses the v6
+// custom data event convention (type starts with "data-").
+//
+// Values: "thinking" (initial), "searching" (tool loop continuing).
+type UIStatusPart struct {
+	Status string
+}
+
+func (p UIStatusPart) UIStreamType() string { return "data-status" }
+func (p UIStatusPart) UIStreamJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type      string `json:"type"`
+		Data      string `json:"data"`
+		Transient bool   `json:"transient"`
+	}{"data-status", p.Status, true})
+}
+
 // UITitlePart is an Endure-specific custom event that injects a thread title
 // into the stream. Uses the "t:" prefix for backwards compatibility with the
 // existing corapinew protocol.
