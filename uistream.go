@@ -535,6 +535,19 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 				yield(UIDonePart{}, nil)
 				return
 
+			case WebSearchResultStreamPart:
+				// Emit search results as a tool output (reuse tool-output-available)
+				if !yield(UIToolOutputAvailablePart{
+					ToolCallID: p.ToolCallID,
+					Output: map[string]any{
+						"type":    "web_search_results",
+						"results": p.Results,
+						"error":   p.Error,
+					},
+				}, nil) {
+					return
+				}
+
 			case RedactedReasoningStreamPart, ReasoningSignatureStreamPart:
 				// No v6 equivalent yet — skip silently
 

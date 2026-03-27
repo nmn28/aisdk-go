@@ -10,20 +10,17 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
-// ToolsToAnthropic converts the tool format to Anthropic's API format.
+// ToolsToAnthropic converts client tools to Anthropic's API format.
 func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
 	anthropicTools := []anthropic.ToolUnionParam{}
 	for _, tool := range tools {
-		// Construct the ToolInputSchemaParam struct directly
 		properties := tool.Schema.Properties
 		if properties == nil {
 			properties = make(map[string]interface{})
 		}
 		inputSchema := anthropic.ToolInputSchemaParam{
-			Properties: properties, // Assuming Properties is map[string]interface{}
-			// Type defaults to "object" via omitempty / SDK marshalling if needed
+			Properties: properties,
 		}
-		// Add required fields if they exist
 		if len(tool.Schema.Required) > 0 {
 			if inputSchema.ExtraFields == nil {
 				inputSchema.ExtraFields = make(map[string]interface{})
@@ -35,9 +32,41 @@ func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
 			OfTool: &anthropic.ToolParam{
 				Name:        tool.Name,
 				Description: anthropic.String(tool.Description),
-				InputSchema: inputSchema, // Assign the struct directly
+				InputSchema: inputSchema,
 			},
 		})
+	}
+	return anthropicTools
+}
+
+// ServerToolsToAnthropic converts server tool definitions to Anthropic's API format.
+func ServerToolsToAnthropic(serverTools []ServerTool) []anthropic.ToolUnionParam {
+	anthropicTools := []anthropic.ToolUnionParam{}
+	for _, st := range serverTools {
+		switch st.Type {
+		case "web_search_20250305":
+			param := &anthropic.WebSearchTool20250305Param{}
+			if st.MaxUses != nil {
+				param.MaxUses = anthropic.Opt(*st.MaxUses)
+			}
+			if len(st.AllowedDomains) > 0 {
+				param.AllowedDomains = st.AllowedDomains
+			}
+			if len(st.BlockedDomains) > 0 {
+				param.BlockedDomains = st.BlockedDomains
+			}
+			if st.UserLocation != nil {
+				param.UserLocation = anthropic.WebSearchTool20250305UserLocationParam{
+					City:     anthropic.Opt(st.UserLocation.City),
+					Region:   anthropic.Opt(st.UserLocation.Region),
+					Country:  anthropic.Opt(st.UserLocation.Country),
+					Timezone: anthropic.Opt(st.UserLocation.Timezone),
+				}
+			}
+			anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
+				OfWebSearchTool20250305: param,
+			})
+		}
 	}
 	return anthropicTools
 }
@@ -74,10 +103,30 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			for _, part := range message.Parts {
 				switch part.Type {
 				case PartTypeText:
+					textParam := &anthropic.TextBlockParam{
+						Text: part.Text,
+					}
+					// Forward citations with encrypted_index for multi-turn
+					if len(part.Citations) > 0 {
+						citations := make([]anthropic.TextCitationParamUnion, 0, len(part.Citations))
+						for _, c := range part.Citations {
+							if c.Type == "web_search_result_location" && c.EncryptedIndex != "" {
+								citations = append(citations, anthropic.TextCitationParamUnion{
+									OfWebSearchResultLocation: &anthropic.CitationWebSearchResultLocationParam{
+										CitedText:      c.CitedText,
+										EncryptedIndex: c.EncryptedIndex,
+										Title:          anthropic.Opt(c.Title),
+										URL:            c.URL,
+									},
+								})
+							}
+						}
+						if len(citations) > 0 {
+							textParam.Citations = citations
+						}
+					}
 					content = append(content, anthropic.ContentBlockParamUnion{
-						OfText: &anthropic.TextBlockParam{
-							Text: part.Text,
-						},
+						OfText: textParam,
 					})
 				case PartTypeToolInvocation:
 					if part.ToolInvocation == nil {
@@ -99,7 +148,6 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						continue
 					}
 
-					// Tool Results are sent as a separate message, so we need to flush existing content here.
 					anthropicMessages = append(anthropicMessages, anthropic.MessageParam{
 						Role:    role,
 						Content: content,
@@ -131,7 +179,6 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						}
 					}
 
-					// Send the tool result as a separate message with the role as user.
 					anthropicMessages = append(anthropicMessages, anthropic.MessageParam{
 						Role: anthropic.MessageParamRoleUser,
 						Content: []anthropic.ContentBlockParamUnion{
@@ -144,6 +191,53 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						},
 					})
 					content = nil
+
+				case PartTypeServerToolUse:
+					// Round-trip server_tool_use blocks for multi-turn
+					inputJSON, _ := json.Marshal(part.ServerToolInput)
+					content = append(content, anthropic.ContentBlockParamUnion{
+						OfServerToolUse: &anthropic.ServerToolUseBlockParam{
+							ID:    part.ServerToolUseID,
+							Input: json.RawMessage(inputJSON),
+						},
+					})
+
+				case PartTypeWebSearchResult:
+					// Round-trip web_search_tool_result blocks with encrypted content
+					if part.WebSearchError != "" {
+						// Error result
+						content = append(content, anthropic.ContentBlockParamUnion{
+							OfWebSearchToolResult: &anthropic.WebSearchToolResultBlockParam{
+								ToolUseID: part.WebSearchToolUseID,
+								Content: anthropic.WebSearchToolResultBlockParamContentUnion{
+									OfRequestWebSearchToolResultError: &anthropic.WebSearchToolRequestErrorParam{
+										ErrorCode: anthropic.WebSearchToolRequestErrorErrorCode(part.WebSearchError),
+									},
+								},
+							},
+						})
+					} else {
+						// Success result with encrypted content
+						resultParams := make([]anthropic.WebSearchResultBlockParam, len(part.WebSearchResults))
+						for i, r := range part.WebSearchResults {
+							resultParams[i] = anthropic.WebSearchResultBlockParam{
+								EncryptedContent: r.EncryptedContent,
+								Title:            r.Title,
+								URL:              r.URL,
+							}
+							if r.PageAge != "" {
+								resultParams[i].PageAge = anthropic.Opt(r.PageAge)
+							}
+						}
+						content = append(content, anthropic.ContentBlockParamUnion{
+							OfWebSearchToolResult: &anthropic.WebSearchToolResultBlockParam{
+								ToolUseID: part.WebSearchToolUseID,
+								Content: anthropic.WebSearchToolResultBlockParamContentUnion{
+									OfWebSearchToolResultBlockItem: resultParams,
+								},
+							},
+						})
+					}
 				}
 			}
 		case "user":
@@ -211,9 +305,12 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 		var finalReason FinishReason = FinishReasonUnknown
 		var finalUsage Usage
 		var currentToolCall struct {
-			ID   string
-			Args string
+			ID           string
+			Args         string
+			IsServerTool bool
 		}
+		// Track which tool call IDs are server tools so we skip their deltas in WithToolCalling
+		serverToolIDs := make(map[string]bool)
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -247,12 +344,28 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					if !yield(ReasoningStreamPart{Content: delta.Thinking}, nil) {
 						return
 					}
+				case anthropic.CitationsDelta:
+					// Inline citation from web search results
+					if citation, ok := delta.Citation.AsAny().(anthropic.CitationsWebSearchResultLocation); ok {
+						if !yield(SourceStreamPart{
+							SourceType:     "web_search_result_location",
+							ID:             fmt.Sprintf("cite_%d", event.Index),
+							URL:            citation.URL,
+							Title:          citation.Title,
+							CitedText:      citation.CitedText,
+							EncryptedIndex: citation.EncryptedIndex,
+						}, nil) {
+							return
+						}
+					}
 				}
 
 			case anthropic.ContentBlockStartEvent:
-				if block, ok := event.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+				switch block := event.ContentBlock.AsAny().(type) {
+				case anthropic.ToolUseBlock:
 					currentToolCall.ID = block.ID
 					currentToolCall.Args = ""
+					currentToolCall.IsServerTool = false
 
 					if !yield(ToolCallStartStreamPart{
 						ToolCallID: block.ID,
@@ -260,34 +373,85 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					}, nil) {
 						return
 					}
+
+				case anthropic.ServerToolUseBlock:
+					// Server-side tool invocation (e.g., web_search)
+					currentToolCall.ID = block.ID
+					currentToolCall.Args = ""
+					currentToolCall.IsServerTool = true
+					serverToolIDs[block.ID] = true
+
+					if !yield(ToolCallStartStreamPart{
+						ToolCallID:   block.ID,
+						ToolName:     string(block.Name),
+						IsServerTool: true,
+					}, nil) {
+						return
+					}
+
+				case anthropic.WebSearchToolResultBlock:
+					// Server-side search results — arrives as a single block
+					results := block.Content.AsWebSearchResultBlockArray()
+					if len(results) > 0 {
+						wsResults := make([]WebSearchResult, len(results))
+						for i, r := range results {
+							wsResults[i] = WebSearchResult{
+								URL:              r.URL,
+								Title:            r.Title,
+								EncryptedContent: r.EncryptedContent,
+								PageAge:          r.PageAge,
+							}
+						}
+						if !yield(WebSearchResultStreamPart{
+							ToolCallID: block.ToolUseID,
+							Results:    wsResults,
+						}, nil) {
+							return
+						}
+					} else {
+						// Check for error
+						errResult := block.Content.AsResponseWebSearchToolResultError()
+						if string(errResult.ErrorCode) != "" {
+							if !yield(WebSearchResultStreamPart{
+								ToolCallID: block.ToolUseID,
+								Error:      string(errResult.ErrorCode),
+							}, nil) {
+								return
+							}
+						}
+					}
 				}
 
 			case anthropic.MessageDeltaEvent:
-				if event.Delta.StopReason == "tool_use" {
+				switch event.Delta.StopReason {
+				case "tool_use":
 					finalReason = FinishReasonToolCalls
-					if event.Usage.OutputTokens != 0 {
-						tokens := event.Usage.OutputTokens
-						finalUsage.CompletionTokens = &tokens
-					}
-
-					// Reset current tool call after emitting the final delta
-					currentToolCall = struct {
-						ID   string
-						Args string
-					}{}
+				case "pause_turn":
+					finalReason = FinishReasonPauseTurn
+				}
+				if event.Usage.OutputTokens != 0 {
+					tokens := event.Usage.OutputTokens
+					finalUsage.CompletionTokens = &tokens
 				}
 
+				// Reset current tool call
+				currentToolCall = struct {
+					ID           string
+					Args         string
+					IsServerTool bool
+				}{}
+
 			case anthropic.MessageStopEvent:
-				// Determine final reason if not already set by tool_use
+				// Determine final reason if not already set
 				if finalReason == FinishReasonUnknown {
-					finalReason = FinishReasonStop // Default if not tool_use
+					finalReason = FinishReasonStop
 				}
 
 				// Send final finish step
 				if !yield(FinishStepStreamPart{
 					FinishReason: finalReason,
 					Usage:        finalUsage,
-					IsContinued:  false,
+					IsContinued:  finalReason == FinishReasonPauseTurn,
 				}, nil) {
 					return
 				}
@@ -312,7 +476,7 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 		// send a final finish message based on the last known state.
 		if lastChunk == nil || lastChunk.Type != "message_stop" {
 			if finalReason == FinishReasonUnknown {
-				finalReason = FinishReasonError // Indicate abnormal termination
+				finalReason = FinishReasonError
 			}
 
 			yield(FinishMessageStreamPart{

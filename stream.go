@@ -90,6 +90,10 @@ func (s DataStream) WithToolCalling(handleToolCall func(toolCall ToolCall) any) 
 				step++
 
 			case ToolCallStartStreamPart:
+				// Skip server tool calls — they are handled by the API
+				if p.IsServerTool {
+					continue
+				}
 				// Initialize a new partial tool call
 				partialToolCalls[p.ToolCallID] = struct {
 					text     string
@@ -227,10 +231,12 @@ func (p ReasoningSignatureStreamPart) Format() (string, error) {
 
 // SourceStreamPart corresponds to TYPE_ID 'h'.
 type SourceStreamPart struct {
-	SourceType string `json:"sourceType"`
-	ID         string `json:"id"`
-	URL        string `json:"url"`
-	Title      string `json:"title"`
+	SourceType     string `json:"sourceType"`
+	ID             string `json:"id"`
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	CitedText      string `json:"citedText,omitempty"`
+	EncryptedIndex string `json:"encryptedIndex,omitempty"`
 }
 
 func (p SourceStreamPart) TypeID() byte { return 'h' }
@@ -277,6 +283,20 @@ func (p MessageAnnotationStreamPart) Format() (string, error) {
 	return fmt.Sprintf("%c:%s\n", p.TypeID(), string(jsonContent)), nil
 }
 
+// WebSearchResultStreamPart is emitted when Anthropic's server-side web search returns results.
+// This is NOT a standard Vercel AI SDK part — it's an Endure extension.
+// It uses TYPE_ID 'w' (custom).
+type WebSearchResultStreamPart struct {
+	ToolCallID string            `json:"toolCallId"`
+	Results    []WebSearchResult `json:"results,omitempty"`
+	Error      string            `json:"error,omitempty"`
+}
+
+func (p WebSearchResultStreamPart) TypeID() byte { return 'w' }
+func (p WebSearchResultStreamPart) Format() (string, error) {
+	return formatJSONPart(p)
+}
+
 // ErrorStreamPart corresponds to TYPE_ID '3'.
 type ErrorStreamPart struct {
 	Content string
@@ -304,8 +324,9 @@ type ToolCallResult interface {
 
 // ToolCallStartStreamPart corresponds to TYPE_ID 'b'.
 type ToolCallStartStreamPart struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
+	ToolCallID   string `json:"toolCallId"`
+	ToolName     string `json:"toolName"`
+	IsServerTool bool   `json:"isServerTool,omitempty"` // True for Anthropic server tools (web_search)
 }
 
 func (p ToolCallStartStreamPart) TypeID() byte { return 'b' }
@@ -365,6 +386,7 @@ const (
 	FinishReasonLength        FinishReason = "length"
 	FinishReasonContentFilter FinishReason = "content-filter"
 	FinishReasonToolCalls     FinishReason = "tool-calls"
+	FinishReasonPauseTurn     FinishReason = "pause-turn"
 	FinishReasonError         FinishReason = "error"
 	FinishReasonOther         FinishReason = "other"
 	FinishReasonUnknown       FinishReason = "unknown"
@@ -426,12 +448,14 @@ type Message struct {
 type PartType string
 
 const (
-	PartTypeText           PartType = "text"
-	PartTypeReasoning      PartType = "reasoning"
-	PartTypeToolInvocation PartType = "tool-invocation"
-	PartTypeSource         PartType = "source"
-	PartTypeFile           PartType = "file"
-	PartTypeStepStart      PartType = "step-start"
+	PartTypeText              PartType = "text"
+	PartTypeReasoning         PartType = "reasoning"
+	PartTypeToolInvocation    PartType = "tool-invocation"
+	PartTypeSource            PartType = "source"
+	PartTypeFile              PartType = "file"
+	PartTypeStepStart         PartType = "step-start"
+	PartTypeServerToolUse     PartType = "server-tool-use"
+	PartTypeWebSearchResult   PartType = "web-search-result"
 )
 
 type ReasoningDetail struct {
@@ -452,7 +476,8 @@ type Part struct {
 	Type PartType `json:"type"`
 
 	// Type: "text"
-	Text string `json:"text,omitempty"`
+	Text     string     `json:"text,omitempty"`
+	Citations []Citation `json:"citations,omitempty"` // Inline citations from web search
 
 	// Type: "reasoning"
 	Reasoning string            `json:"reasoning,omitempty"`
@@ -468,15 +493,63 @@ type Part struct {
 	MimeType string `json:"mimeType,omitempty"`
 	Data     []byte `json:"data,omitempty"`
 
+	// Type: "server-tool-use" — Anthropic server tool invocation
+	ServerToolUseID   string `json:"serverToolUseId,omitempty"`
+	ServerToolName    string `json:"serverToolName,omitempty"`
+	ServerToolInput   any    `json:"serverToolInput,omitempty"`
+
+	// Type: "web-search-result" — Results from Anthropic native web search
+	WebSearchToolUseID string              `json:"webSearchToolUseId,omitempty"`
+	WebSearchResults   []WebSearchResult   `json:"webSearchResults,omitempty"`
+	WebSearchError     string              `json:"webSearchError,omitempty"`
+	RawContentJSON     string              `json:"-"` // Preserves encrypted_content for multi-turn round-trip
+
 	// Type: "step-start" - No additional fields
 
 	isComplete bool `json:"-"` // Internal accumulator tracking
+}
+
+// WebSearchResult represents a single search result from Anthropic's native web search.
+type WebSearchResult struct {
+	URL              string `json:"url"`
+	Title            string `json:"title"`
+	EncryptedContent string `json:"encrypted_content,omitempty"` // Must be preserved for multi-turn
+	PageAge          string `json:"page_age,omitempty"`
 }
 
 type Tool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Schema      Schema `json:"parameters"`
+}
+
+// ServerTool defines an Anthropic server-side tool (e.g., web_search).
+// These are executed by Anthropic's API, not by the client.
+type ServerTool struct {
+	Type           string            `json:"type"`                      // e.g. "web_search_20250305"
+	Name           string            `json:"name"`                      // e.g. "web_search"
+	MaxUses        *int64            `json:"max_uses,omitempty"`        // Max searches per request
+	AllowedDomains []string          `json:"allowed_domains,omitempty"` // Mutually exclusive with BlockedDomains
+	BlockedDomains []string          `json:"blocked_domains,omitempty"` // Mutually exclusive with AllowedDomains
+	UserLocation   *UserLocation     `json:"user_location,omitempty"`   // Approximate user location
+}
+
+// UserLocation provides approximate user location for search relevance.
+type UserLocation struct {
+	Type     string `json:"type"`               // "approximate"
+	City     string `json:"city,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Country  string `json:"country,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+}
+
+// Citation represents an inline citation from a web search result.
+type Citation struct {
+	Type           string `json:"type"`                      // "web_search_result_location"
+	URL            string `json:"url"`
+	Title          string `json:"title,omitempty"`
+	EncryptedIndex string `json:"encrypted_index,omitempty"` // Must be preserved for multi-turn
+	CitedText      string `json:"cited_text,omitempty"`
 }
 
 type Schema struct {
@@ -597,15 +670,33 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add SourceStreamPart without an active message")
 		}
+		// Attach citation to the most recent text part (inline Perplexity-style)
+		citation := Citation{
+			Type:           p.SourceType,
+			URL:            p.URL,
+			Title:          p.Title,
+			CitedText:      p.CitedText,
+			EncryptedIndex: p.EncryptedIndex,
+		}
+		attachedToText := false
+		for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
+			if currentMsgPtr.Parts[i].Type == PartTypeText {
+				currentMsgPtr.Parts[i].Citations = append(currentMsgPtr.Parts[i].Citations, citation)
+				attachedToText = true
+				break
+			}
+		}
+		// Also emit as a standalone source part for backward compatibility
 		currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{
 			Type: PartTypeSource,
 			Source: &SourceInfo{
 				URI:         p.URL,
 				ContentType: "",
 				Data:        "",
-				Metadata:    map[string]any{"id": p.ID, "title": p.Title, "sourceType": p.SourceType},
+				Metadata:    map[string]any{"id": p.ID, "title": p.Title, "sourceType": p.SourceType, "citedText": p.CitedText},
 			},
 		})
+		_ = attachedToText
 
 	case StartStepStreamPart:
 		if currentMsgPtr == nil {
@@ -747,6 +838,18 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 	case ErrorStreamPart:
 		a.finishReason = FinishReasonError
 		return fmt.Errorf("error in stream: %s", p.Content)
+
+	case WebSearchResultStreamPart:
+		if currentMsgPtr == nil {
+			return fmt.Errorf("cannot add WebSearchResultStreamPart without an active message")
+		}
+		part := Part{
+			Type:               PartTypeWebSearchResult,
+			WebSearchToolUseID: p.ToolCallID,
+			WebSearchResults:   p.Results,
+			WebSearchError:     p.Error,
+		}
+		currentMsgPtr.Parts = append(currentMsgPtr.Parts, part)
 
 	case RedactedReasoningStreamPart, ReasoningSignatureStreamPart:
 		// No action needed for accumulation
