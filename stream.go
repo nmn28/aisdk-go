@@ -139,7 +139,9 @@ func (s DataStream) WithAccumulator(accumulator *DataStreamAccumulator) DataStre
 				yield(nil, err)
 				return
 			}
-			yield(part, nil)
+			if !yield(part, nil) {
+				return
+			}
 		}
 	}
 }
