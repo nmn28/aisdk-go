@@ -11,9 +11,11 @@ import (
 )
 
 // ToolsToAnthropic converts client tools to Anthropic's API format.
+// It sets a cache_control breakpoint on the last tool so that Anthropic
+// can cache the tool definitions across requests (prompt caching).
 func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
-	anthropicTools := []anthropic.ToolUnionParam{}
-	for _, tool := range tools {
+	anthropicTools := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for i, tool := range tools {
 		properties := tool.Schema.Properties
 		if properties == nil {
 			properties = make(map[string]interface{})
@@ -28,12 +30,18 @@ func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
 			inputSchema.ExtraFields["required"] = tool.Schema.Required
 		}
 
+		tp := &anthropic.ToolParam{
+			Name:        tool.Name,
+			Description: anthropic.String(tool.Description),
+			InputSchema: inputSchema,
+		}
+		// Set cache breakpoint on the last tool for prompt caching
+		if i == len(tools)-1 {
+			tp.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+
 		anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
-			OfTool: &anthropic.ToolParam{
-				Name:        tool.Name,
-				Description: anthropic.String(tool.Description),
-				InputSchema: inputSchema,
-			},
+			OfTool: tp,
 		})
 	}
 	return anthropicTools
@@ -97,6 +105,10 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						Text: part.Text,
 					})
 				}
+			}
+			// Set cache breakpoint on the last system text block for prompt caching
+			if len(systemPrompt) > 0 {
+				systemPrompt[len(systemPrompt)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
 			}
 			break
 		case "assistant":
