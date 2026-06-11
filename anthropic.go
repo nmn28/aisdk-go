@@ -393,9 +393,17 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					currentToolCall.IsServerTool = true
 					serverToolIDs[block.ID] = true
 
+					// SDK streaming reconstruction sometimes leaves Name empty
+					// (known bug: anthropic-sdk-python#954, litellm#17254).
+					// Fall back to "web_search" — the only server tool today.
+					serverToolName := string(block.Name)
+					if serverToolName == "" {
+						serverToolName = "web_search"
+					}
+
 					if !yield(ToolCallStartStreamPart{
 						ToolCallID:   block.ID,
-						ToolName:     string(block.Name),
+						ToolName:     serverToolName,
 						IsServerTool: true,
 					}, nil) {
 						return
