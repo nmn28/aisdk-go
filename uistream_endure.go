@@ -57,11 +57,16 @@ type UITitlePart struct {
 
 func (p UITitlePart) UIStreamType() string { return "data-endure-title" }
 func (p UITitlePart) UIStreamJSON() ([]byte, error) {
+	// v6 strictObject schema requires { type, data, transient? } — extra fields are rejected.
+	// transient=true triggers onData callback without persisting to message.parts.
 	return json.Marshal(struct {
-		Type     string `json:"type"`
+		Type      string `json:"type"`
+		Data      any    `json:"data"`
+		Transient bool   `json:"transient"`
+	}{"data-endure-title", struct {
 		Title    string `json:"title"`
 		ThreadID string `json:"threadId"`
-	}{"data-endure-title", p.Title, p.ThreadID})
+	}{p.Title, p.ThreadID}, true})
 }
 
 // FormatTitleEvent returns the raw "t:" format used by corapinew for
