@@ -396,8 +396,10 @@ const (
 
 // Usage details the token usage.
 type Usage struct {
-	PromptTokens     *int64 `json:"promptTokens"`
-	CompletionTokens *int64 `json:"completionTokens"`
+	PromptTokens             *int64 `json:"promptTokens"`
+	CompletionTokens         *int64 `json:"completionTokens"`
+	CacheReadInputTokens     *int64 `json:"cacheReadInputTokens,omitempty"`
+	CacheCreationInputTokens *int64 `json:"cacheCreationInputTokens,omitempty"`
 }
 
 // FinishStepStreamPart corresponds to TYPE_ID 'e'.

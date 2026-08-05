@@ -331,6 +331,20 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 			event := chunk.AsAny()
 			switch event := event.(type) {
 			case anthropic.MessageStartEvent:
+				// Capture input tokens and cache breakdown from message_start
+				if event.Message.Usage.InputTokens != 0 {
+					tokens := event.Message.Usage.InputTokens
+					finalUsage.PromptTokens = &tokens
+				}
+				if event.Message.Usage.CacheReadInputTokens != 0 {
+					tokens := event.Message.Usage.CacheReadInputTokens
+					finalUsage.CacheReadInputTokens = &tokens
+				}
+				if event.Message.Usage.CacheCreationInputTokens != 0 {
+					tokens := event.Message.Usage.CacheCreationInputTokens
+					finalUsage.CacheCreationInputTokens = &tokens
+				}
+
 				if !yield(StartStepStreamPart{
 					MessageID: event.Message.ID,
 				}, nil) {
