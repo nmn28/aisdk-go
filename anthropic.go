@@ -144,7 +144,19 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 					if part.ToolInvocation == nil {
 						return nil, nil, fmt.Errorf("assistant message part has type tool-invocation but nil ToolInvocation field (ID: %s)", message.ID)
 					}
-					argsJSON, err := json.Marshal(part.ToolInvocation.Args)
+					// Streaming stores Args as string; Anthropic requires an object.
+					args := part.ToolInvocation.Args
+					if argsStr, ok := args.(string); ok && argsStr != "" {
+						var parsed map[string]any
+						if json.Unmarshal([]byte(argsStr), &parsed) == nil {
+							args = parsed
+						} else {
+							args = map[string]any{}
+						}
+					} else if args == nil || args == "" {
+						args = map[string]any{}
+					}
+					argsJSON, err := json.Marshal(args)
 					if err != nil {
 						return nil, nil, fmt.Errorf("marshalling tool input for call %s: %w", part.ToolInvocation.ToolCallID, err)
 					}

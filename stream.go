@@ -715,7 +715,8 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add ToolCallStartStreamPart without an active message")
 		}
-		// Initialize a new tool call
+		// Initialize a new tool call. Args starts as empty string for delta
+		// concatenation during streaming; converted to object before API replay.
 		newPart := Part{
 			Type: PartTypeToolInvocation,
 			ToolInvocation: &ToolInvocation{
