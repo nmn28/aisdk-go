@@ -508,6 +508,9 @@ type Part struct {
 	WebSearchError     string              `json:"webSearchError,omitempty"`
 	RawContentJSON     string              `json:"-"` // Preserves encrypted_content for multi-turn round-trip
 
+	// CacheControl signals the Anthropic adapter to set cache_control: ephemeral on this block.
+	CacheControl bool `json:"-"`
+
 	// Type: "step-start" - No additional fields
 
 	isComplete bool `json:"-"` // Internal accumulator tracking

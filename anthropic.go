@@ -101,10 +101,13 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			}
 			for _, part := range message.Parts {
 				if part.Type == PartTypeText && part.Text != "" {
-					systemPrompt = append(systemPrompt, anthropic.TextBlockParam{
-						Text:         part.Text,
-						CacheControl: anthropic.NewCacheControlEphemeralParam(),
-					})
+					block := anthropic.TextBlockParam{
+						Text: part.Text,
+					}
+					if part.CacheControl {
+						block.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
+					systemPrompt = append(systemPrompt, block)
 				}
 			}
 			break
