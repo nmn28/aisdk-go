@@ -102,13 +102,10 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			for _, part := range message.Parts {
 				if part.Type == PartTypeText && part.Text != "" {
 					systemPrompt = append(systemPrompt, anthropic.TextBlockParam{
-						Text: part.Text,
+						Text:         part.Text,
+						CacheControl: anthropic.NewCacheControlEphemeralParam(),
 					})
 				}
-			}
-			// Set cache breakpoint on the last system text block for prompt caching
-			if len(systemPrompt) > 0 {
-				systemPrompt[len(systemPrompt)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
 			}
 			break
 		case "assistant":
