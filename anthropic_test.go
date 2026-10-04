@@ -171,6 +171,218 @@ data: {"type":"message_stop" }`
 	require.JSONEq(t, `{"message":"Message printed to the console"}`, toolResultBlockWithResult.Content[0].OfText.Text)
 }
 
+// TestAnthropicThinkingRoundTrip verifies that signed thinking blocks survive
+// the accumulator → MessagesToAnthropic round-trip. When Claude calls a tool
+// during extended thinking, round 2 must include the signed thinking block from
+// round 1 byte-identical, or Anthropic rejects the request.
+func TestAnthropicThinkingRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a round-1 SSE stream: thinking → signature → tool_use
+	const thinkingText = "Let me analyze this step by step. The user wants to know about muscle soreness."
+	const thinkingSignature = "EqoBCkgIARABGAIiQLTMusa0a0sYmKf4RE97VYjCc8PCh3JO+QAAKE0d9bqVWrl0X4OaSThRXSOxDcN7beFS" // fake but representative
+	const toolCallID = "toolu_01ABC123"
+	const toolName = "search_pubmed"
+
+	anthropicResponses := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_thinking_01","type":"message","role":"assistant","model":"claude-opus-4-20250514","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me analyze this step by step. "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants to know about muscle soreness."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + thinkingSignature + `"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"` + toolCallID + `","name":"` + toolName + `","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"delayed onset muscle soreness\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":150}}
+
+event: message_stop
+data: {"type":"message_stop"}`
+
+	decoder := ssestream.NewDecoder(&http.Response{
+		Body: io.NopCloser(strings.NewReader(anthropicResponses)),
+	})
+	typedStream := ssestream.NewStream[anthropic.MessageStreamEventUnion](decoder, nil)
+
+	var acc aisdk.DataStreamAccumulator
+	stream := aisdk.AnthropicToDataStream(typedStream)
+	stream = stream.WithToolCalling(func(toolCall aisdk.ToolCall) any {
+		return map[string]any{"results": []string{"DOMS is caused by eccentric exercise"}}
+	})
+	stream = stream.WithAccumulator(&acc)
+	for _, err := range stream {
+		require.NoError(t, err)
+	}
+
+	// Verify the accumulator captured reasoning with details
+	msgs := acc.Messages()
+	require.Len(t, msgs, 1, "expected 1 accumulated message")
+	msg := msgs[0]
+	require.Equal(t, "assistant", msg.Role)
+
+	// Find the reasoning part
+	var reasoningPart *aisdk.Part
+	for i := range msg.Parts {
+		if msg.Parts[i].Type == aisdk.PartTypeReasoning {
+			reasoningPart = &msg.Parts[i]
+			break
+		}
+	}
+	require.NotNil(t, reasoningPart, "expected a reasoning part in accumulated message")
+	require.Equal(t, thinkingText, reasoningPart.Reasoning)
+	require.Len(t, reasoningPart.Details, 1, "expected 1 reasoning detail (signed thinking block)")
+	require.Equal(t, "text", reasoningPart.Details[0].Type)
+	require.Equal(t, thinkingText, reasoningPart.Details[0].Text)
+	require.Equal(t, thinkingSignature, reasoningPart.Details[0].Signature, "signature must be byte-identical")
+
+	// ---- ROUND-TRIP: Feed accumulated messages back through MessagesToAnthropic ----
+	// This simulates building the round-2 request after tool execution.
+	anthropicMsgs, _, err := aisdk.MessagesToAnthropic(msgs)
+	require.NoError(t, err)
+
+	// We expect: assistant message (thinking + tool_use) then user message (tool_result)
+	require.Len(t, anthropicMsgs, 2, "expected assistant + user messages for round-2")
+
+	assistantMsg := anthropicMsgs[0]
+	require.Equal(t, anthropic.MessageParamRoleAssistant, assistantMsg.Role)
+
+	// The assistant content should have: thinking block, tool_use block
+	// (step-start and text parts are skipped if empty)
+	var foundThinking bool
+	var foundToolUse bool
+	for _, block := range assistantMsg.Content {
+		if block.OfThinking != nil {
+			foundThinking = true
+			require.Equal(t, thinkingText, block.OfThinking.Thinking, "thinking text must be byte-identical in round-2 request")
+			require.Equal(t, thinkingSignature, block.OfThinking.Signature, "thinking signature must be byte-identical in round-2 request")
+		}
+		if block.OfToolUse != nil {
+			foundToolUse = true
+			require.Equal(t, toolCallID, block.OfToolUse.ID)
+			require.Equal(t, toolName, block.OfToolUse.Name)
+		}
+	}
+	require.True(t, foundThinking, "round-2 request must contain the signed thinking block")
+	require.True(t, foundToolUse, "round-2 request must contain the tool_use block")
+
+	// Verify the tool result is in the user message
+	userMsg := anthropicMsgs[1]
+	require.Equal(t, anthropic.MessageParamRoleUser, userMsg.Role)
+	require.Len(t, userMsg.Content, 1)
+	require.NotNil(t, userMsg.Content[0].OfToolResult)
+	require.Equal(t, toolCallID, userMsg.Content[0].OfToolResult.ToolUseID)
+
+	// Verify the thinking block serializes correctly to JSON (what actually goes over the wire)
+	for _, block := range assistantMsg.Content {
+		if block.OfThinking != nil {
+			j, err := json.Marshal(block)
+			require.NoError(t, err)
+			var raw map[string]any
+			require.NoError(t, json.Unmarshal(j, &raw))
+			require.Equal(t, thinkingText, raw["thinking"], "JSON wire format: thinking text")
+			require.Equal(t, thinkingSignature, raw["signature"], "JSON wire format: signature")
+		}
+	}
+
+	t.Log("PASS: Signed thinking blocks survive accumulator → MessagesToAnthropic round-trip")
+}
+
+// TestAnthropicRedactedThinkingRoundTrip verifies that redacted thinking blocks
+// also survive the round-trip.
+func TestAnthropicRedactedThinkingRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const redactedData = "EqoBCkgIARABGAIiQLTMusa0a0sY..."
+
+	anthropicResponses := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_redacted_01","type":"message","role":"assistant","model":"claude-opus-4-20250514","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"` + redactedData + `"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Here is my answer."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":20}}
+
+event: message_stop
+data: {"type":"message_stop"}`
+
+	decoder := ssestream.NewDecoder(&http.Response{
+		Body: io.NopCloser(strings.NewReader(anthropicResponses)),
+	})
+	typedStream := ssestream.NewStream[anthropic.MessageStreamEventUnion](decoder, nil)
+
+	var acc aisdk.DataStreamAccumulator
+	stream := aisdk.AnthropicToDataStream(typedStream)
+	stream = stream.WithAccumulator(&acc)
+	for _, err := range stream {
+		require.NoError(t, err)
+	}
+
+	msgs := acc.Messages()
+	require.Len(t, msgs, 1)
+
+	// Find reasoning part with redacted detail
+	var reasoningPart *aisdk.Part
+	for i := range msgs[0].Parts {
+		if msgs[0].Parts[i].Type == aisdk.PartTypeReasoning {
+			reasoningPart = &msgs[0].Parts[i]
+			break
+		}
+	}
+	require.NotNil(t, reasoningPart)
+	require.Len(t, reasoningPart.Details, 1)
+	require.Equal(t, "redacted", reasoningPart.Details[0].Type)
+	require.Equal(t, redactedData, reasoningPart.Details[0].Data)
+
+	// Round-trip through MessagesToAnthropic
+	anthropicMsgs, _, err := aisdk.MessagesToAnthropic(msgs)
+	require.NoError(t, err)
+	require.Len(t, anthropicMsgs, 1)
+
+	var foundRedacted bool
+	for _, block := range anthropicMsgs[0].Content {
+		if block.OfRedactedThinking != nil {
+			foundRedacted = true
+			require.Equal(t, redactedData, block.OfRedactedThinking.Data, "redacted data must be byte-identical")
+		}
+	}
+	require.True(t, foundRedacted, "round-2 request must contain the redacted thinking block")
+	t.Log("PASS: Redacted thinking blocks survive round-trip")
+}
+
 func TestMessagesToAnthropic_Live(t *testing.T) {
 	t.Parallel()
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")

@@ -186,9 +186,21 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 			choice := chunk.Choices[0]
 
 			if choice.Delta.Content != "" {
-				// Yield a Part object instead of TextStreamPart
 				if !yield(TextStreamPart{Content: choice.Delta.Content}, nil) {
 					return
+				}
+			}
+
+			// xAI reasoning_content: extract from raw JSON since the OpenAI SDK
+			// doesn't have a typed field for this xAI extension.
+			if rawJSON := choice.Delta.RawJSON(); rawJSON != "" {
+				var rawDelta struct {
+					ReasoningContent string `json:"reasoning_content"`
+				}
+				if json.Unmarshal([]byte(rawJSON), &rawDelta) == nil && rawDelta.ReasoningContent != "" {
+					if !yield(ReasoningStreamPart{Content: rawDelta.ReasoningContent}, nil) {
+						return
+					}
 				}
 			}
 
