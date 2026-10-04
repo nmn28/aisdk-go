@@ -216,6 +216,38 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 					})
 					content = nil
 
+				case PartTypeReasoning:
+					// Reconstruct thinking/redacted_thinking blocks from Details.
+					if len(part.Details) > 0 {
+						for _, d := range part.Details {
+							switch d.Type {
+							case "text":
+								// Thinking block with text and signature
+								content = append(content, anthropic.ContentBlockParamUnion{
+									OfThinking: &anthropic.ThinkingBlockParam{
+										Thinking:  d.Text,
+										Signature: d.Signature,
+									},
+								})
+							case "redacted":
+								// Redacted thinking block — signature/data only
+								content = append(content, anthropic.ContentBlockParamUnion{
+									OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{
+										Data: d.Data,
+									},
+								})
+							}
+						}
+					} else if part.Reasoning != "" {
+						// Legacy fallback: single reasoning text without details
+						content = append(content, anthropic.ContentBlockParamUnion{
+							OfThinking: &anthropic.ThinkingBlockParam{
+								Thinking:  part.Reasoning,
+								Signature: "", // Will be rejected by API — caller must provide details
+							},
+						})
+					}
+
 				case PartTypeServerToolUse:
 					// Round-trip server_tool_use blocks for multi-turn
 					inputJSON, _ := json.Marshal(part.ServerToolInput)
@@ -382,6 +414,10 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					if !yield(ReasoningStreamPart{Content: delta.Thinking}, nil) {
 						return
 					}
+				case anthropic.SignatureDelta:
+					if !yield(ReasoningSignatureStreamPart{Signature: delta.Signature}, nil) {
+						return
+					}
 				case anthropic.CitationsDelta:
 					// Inline citation from web search results
 					if citation, ok := delta.Citation.AsAny().(anthropic.CitationsWebSearchResultLocation); ok {
@@ -432,6 +468,15 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 						ToolName:     serverToolName,
 						IsServerTool: true,
 					}, nil) {
+						return
+					}
+
+				case anthropic.ThinkingBlock:
+					// Thinking block start — content arrives via ThinkingDelta events
+
+				case anthropic.RedactedThinkingBlock:
+					// Redacted thinking — entire content available at start
+					if !yield(RedactedReasoningStreamPart{Data: block.Data}, nil) {
 						return
 					}
 

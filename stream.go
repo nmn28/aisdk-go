@@ -859,8 +859,44 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		}
 		currentMsgPtr.Parts = append(currentMsgPtr.Parts, part)
 
-	case RedactedReasoningStreamPart, ReasoningSignatureStreamPart:
-		// No action needed for accumulation
+	case ReasoningSignatureStreamPart:
+		if currentMsgPtr == nil {
+			return fmt.Errorf("cannot add ReasoningSignatureStreamPart without an active message")
+		}
+		// Find the last reasoning part and finalize its details with the signature.
+		// The signature marks the end of a thinking block, so we wrap accumulated
+		// reasoning text into a detail entry with the signature attached.
+		for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
+			if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
+				currentMsgPtr.Parts[i].Details = append(currentMsgPtr.Parts[i].Details, ReasoningDetail{
+					Type:      "text",
+					Text:      currentMsgPtr.Parts[i].Reasoning,
+					Signature: p.Signature,
+				})
+				break
+			}
+		}
+
+	case RedactedReasoningStreamPart:
+		if currentMsgPtr == nil {
+			return fmt.Errorf("cannot add RedactedReasoningStreamPart without an active message")
+		}
+		// Ensure a reasoning part exists to attach the redacted detail to.
+		var reasoningPart *Part
+		for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
+			if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
+				reasoningPart = &currentMsgPtr.Parts[i]
+				break
+			}
+		}
+		if reasoningPart == nil {
+			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{Type: PartTypeReasoning})
+			reasoningPart = &currentMsgPtr.Parts[len(currentMsgPtr.Parts)-1]
+		}
+		reasoningPart.Details = append(reasoningPart.Details, ReasoningDetail{
+			Type: "redacted",
+			Data: p.Data,
+		})
 
 	default:
 		return fmt.Errorf("unhandled part type: %T", part)
