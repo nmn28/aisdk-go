@@ -116,6 +116,12 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 	googleContents := []*genai.Content{}
 
 	for _, message := range messages {
+		// Fallback: if Parts is empty but Content is non-empty, synthesize a text part.
+		parts := message.Parts
+		if len(parts) == 0 && message.Content != "" {
+			parts = []Part{{Type: PartTypeText, Text: message.Content}}
+		}
+
 		switch message.Role {
 		case "system":
 			// System messages are ignored for Google's main message history.
@@ -125,7 +131,7 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 			content := &genai.Content{
 				Role: "user",
 			}
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					content.Parts = append(content.Parts, &genai.Part{Text: part.Text})
@@ -157,7 +163,7 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 			content := &genai.Content{
 				Role: "model",
 			}
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					content.Parts = append(content.Parts, &genai.Part{

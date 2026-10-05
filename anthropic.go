@@ -94,12 +94,18 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 		role := anthropic.MessageParamRoleAssistant
 		content := []anthropic.ContentBlockParamUnion{}
 
+		// Fallback: if Parts is empty but Content is non-empty, synthesize a text part.
+		parts := message.Parts
+		if len(parts) == 0 && message.Content != "" {
+			parts = []Part{{Type: PartTypeText, Text: message.Content}}
+		}
+
 		switch message.Role {
 		case "system":
 			if len(systemPrompt) > 0 {
 				return nil, nil, fmt.Errorf("multiple system messages found")
 			}
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				if part.Type == PartTypeText && part.Text != "" {
 					block := anthropic.TextBlockParam{
 						Text: part.Text,
@@ -112,7 +118,7 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			}
 			break
 		case "assistant":
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					textParam := &anthropic.TextBlockParam{
@@ -298,7 +304,7 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			}
 		case "user":
 			role = anthropic.MessageParamRoleUser
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					content = append(content, anthropic.ContentBlockParamUnion{

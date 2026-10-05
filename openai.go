@@ -40,12 +40,23 @@ func MessagesToOpenAI(messages []Message) ([]openai.ChatCompletionMessageParamUn
 	openaiMessages := []openai.ChatCompletionMessageParamUnion{}
 
 	for _, message := range messages {
+		// Fallback: if Parts is empty but Content is non-empty, synthesize a text part.
+		parts := message.Parts
+		if len(parts) == 0 && message.Content != "" {
+			parts = []Part{{Type: PartTypeText, Text: message.Content}}
+		}
+
 		switch message.Role {
 		case "system":
-			openaiMessages = append(openaiMessages, openai.SystemMessage(message.Content))
+			// For system messages, use Content directly (OpenAI system messages are plain text).
+			text := message.Content
+			if text == "" && len(parts) > 0 && parts[0].Type == PartTypeText {
+				text = parts[0].Text
+			}
+			openaiMessages = append(openaiMessages, openai.SystemMessage(text))
 		case "user":
 			content := []openai.ChatCompletionContentPartUnionParam{}
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					content = append(content, openai.ChatCompletionContentPartUnionParam{
@@ -84,7 +95,7 @@ func MessagesToOpenAI(messages []Message) ([]openai.ChatCompletionMessageParamUn
 		case "assistant":
 			content := &openai.ChatCompletionAssistantMessageParam{}
 
-			for _, part := range message.Parts {
+			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
 					content.Content.OfArrayOfContentParts = append(content.Content.OfArrayOfContentParts, openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{

@@ -383,6 +383,80 @@ data: {"type":"message_stop"}`
 	t.Log("PASS: Redacted thinking blocks survive round-trip")
 }
 
+// TestMessagesToAnthropic_ContentFallback verifies that when Parts is empty
+// but Content is non-empty, MessagesToAnthropic creates a text part from Content.
+func TestMessagesToAnthropic_ContentFallback(t *testing.T) {
+	t.Parallel()
+
+	messages, system, err := aisdk.MessagesToAnthropic([]aisdk.Message{
+		{
+			Role:    "system",
+			Content: "You are helpful.",
+			// Parts intentionally nil
+		},
+		{
+			Role:    "user",
+			Content: "hello",
+			// Parts intentionally nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, system, 1)
+	require.Equal(t, "You are helpful.", system[0].Text)
+	require.Len(t, messages, 1)
+	require.Equal(t, anthropic.MessageParamRoleUser, messages[0].Role)
+	require.Len(t, messages[0].Content, 1)
+	require.NotNil(t, messages[0].Content[0].OfText)
+	require.Equal(t, "hello", messages[0].Content[0].OfText.Text)
+}
+
+// TestMessagesToOpenAI_ContentFallback verifies that when Parts is empty
+// but Content is non-empty, MessagesToOpenAI creates a text part from Content.
+func TestMessagesToOpenAI_ContentFallback(t *testing.T) {
+	t.Parallel()
+
+	messages, err := aisdk.MessagesToOpenAI([]aisdk.Message{
+		{
+			Role:    "system",
+			Content: "You are helpful.",
+		},
+		{
+			Role:    "user",
+			Content: "hello",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, messages, 2)
+
+	// System message — openai.SystemMessage wraps the content in param.Opt
+	require.NotNil(t, messages[0].OfSystem)
+	require.Equal(t, "You are helpful.", messages[0].OfSystem.Content.OfString.Value)
+
+	// User message — should have synthesized a text part
+	require.NotNil(t, messages[1].OfUser)
+	require.Len(t, messages[1].OfUser.Content.OfArrayOfContentParts, 1)
+	require.NotNil(t, messages[1].OfUser.Content.OfArrayOfContentParts[0].OfText)
+	require.Equal(t, "hello", messages[1].OfUser.Content.OfArrayOfContentParts[0].OfText.Text)
+}
+
+// TestMessagesToGoogle_ContentFallback verifies that when Parts is empty
+// but Content is non-empty, MessagesToGoogle creates a text part from Content.
+func TestMessagesToGoogle_ContentFallback(t *testing.T) {
+	t.Parallel()
+
+	contents, err := aisdk.MessagesToGoogle([]aisdk.Message{
+		{
+			Role:    "user",
+			Content: "hello",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, contents, 1)
+	require.Equal(t, "user", contents[0].Role)
+	require.Len(t, contents[0].Parts, 1)
+	require.Equal(t, "hello", contents[0].Parts[0].Text)
+}
+
 func TestMessagesToAnthropic_Live(t *testing.T) {
 	t.Parallel()
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -416,7 +490,7 @@ func TestMessagesToAnthropic_Live(t *testing.T) {
 
 	stream := client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Messages:  messages,
-		Model:     anthropic.ModelClaude3_5SonnetLatest,
+		Model:     anthropic.ModelClaudeSonnet4_5,
 		System:    systemPrompts,
 		MaxTokens: 10,
 	})
