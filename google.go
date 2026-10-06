@@ -359,6 +359,11 @@ func GoogleToDataStream(stream iter.Seq2[*genai.GenerateContentResponse, error])
 				completionTokens := int64(lastResp.UsageMetadata.CandidatesTokenCount)
 				finalUsage.CompletionTokens = &completionTokens
 			}
+			// Gemini cachedContentTokenCount
+			if lastResp.UsageMetadata.CachedContentTokenCount > 0 {
+				cachedTokens := int64(lastResp.UsageMetadata.CachedContentTokenCount)
+				finalUsage.CacheReadInputTokens = &cachedTokens
+			}
 		}
 
 		// Send final finish step part
