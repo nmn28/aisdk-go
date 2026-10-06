@@ -179,6 +179,7 @@ func MessagesToOpenAI(messages []Message) ([]openai.ChatCompletionMessageParamUn
 func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) DataStream {
 	return func(yield func(DataStreamPart, error) bool) {
 		var lastChunk *openai.ChatCompletionChunk
+		var usageChunk *openai.ChatCompletionChunk
 		var currentToolCallID string
 
 		if stream.Err() != nil {
@@ -192,7 +193,12 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 			lastChunk = &chunk
 
 			if len(chunk.Choices) == 0 {
-				break
+				// Usage-only chunk (stream_options.include_usage sends usage
+				// in a final chunk with empty choices).
+				if chunk.Usage.JSON.CompletionTokens.Valid() || chunk.Usage.JSON.PromptTokens.Valid() {
+					usageChunk = &chunk
+				}
+				continue
 			}
 			choice := chunk.Choices[0]
 
@@ -273,19 +279,27 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 			default:
 				finishReason = FinishReasonStop
 			}
+		}
 
-			if lastChunk.Usage.JSON.CompletionTokens.Valid() {
-				tokens := int64(lastChunk.Usage.CompletionTokens)
+		// Usage may be in the last content chunk OR in a separate empty-choices chunk
+		// (when stream_options.include_usage is set). Prefer the dedicated usage chunk.
+		uc := usageChunk
+		if uc == nil && lastChunk != nil {
+			uc = lastChunk
+		}
+		if uc != nil {
+			if uc.Usage.JSON.CompletionTokens.Valid() {
+				tokens := int64(uc.Usage.CompletionTokens)
 				completionTokens = &tokens
 			}
-			if lastChunk.Usage.JSON.PromptTokens.Valid() {
-				tokens := int64(lastChunk.Usage.PromptTokens)
+			if uc.Usage.JSON.PromptTokens.Valid() {
+				tokens := int64(uc.Usage.PromptTokens)
 				promptTokens = &tokens
 			}
 			// OpenAI cached_tokens from prompt_tokens_details
-			if lastChunk.Usage.PromptTokensDetails.JSON.CachedTokens.Valid() &&
-				lastChunk.Usage.PromptTokensDetails.CachedTokens > 0 {
-				tokens := lastChunk.Usage.PromptTokensDetails.CachedTokens
+			if uc.Usage.PromptTokensDetails.JSON.CachedTokens.Valid() &&
+				uc.Usage.PromptTokensDetails.CachedTokens > 0 {
+				tokens := uc.Usage.PromptTokensDetails.CachedTokens
 				cacheReadTokens = &tokens
 			}
 		}
