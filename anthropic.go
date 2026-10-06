@@ -124,6 +124,9 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 					textParam := &anthropic.TextBlockParam{
 						Text: part.Text,
 					}
+					if part.CacheControl {
+						textParam.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 					// Forward citations with encrypted_index for multi-turn
 					if len(part.Citations) > 0 {
 						citations := make([]anthropic.TextCitationParamUnion, 0, len(part.Citations))
@@ -307,8 +310,12 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 			for _, part := range parts {
 				switch part.Type {
 				case PartTypeText:
+					tp := &anthropic.TextBlockParam{Text: part.Text}
+					if part.CacheControl {
+						tp.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 					content = append(content, anthropic.ContentBlockParamUnion{
-						OfText: &anthropic.TextBlockParam{Text: part.Text},
+						OfText: tp,
 					})
 				case PartTypeFile:
 					content = append(content, anthropic.ContentBlockParamUnion{
