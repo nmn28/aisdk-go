@@ -169,12 +169,16 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 					if err != nil {
 						return nil, nil, fmt.Errorf("marshalling tool input for call %s: %w", part.ToolInvocation.ToolCallID, err)
 					}
+					tub := &anthropic.ToolUseBlockParam{
+						ID:    part.ToolInvocation.ToolCallID,
+						Input: json.RawMessage(argsJSON),
+						Name:  part.ToolInvocation.ToolName,
+					}
+					if part.CacheControl {
+						tub.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 					content = append(content, anthropic.ContentBlockParamUnion{
-						OfToolUse: &anthropic.ToolUseBlockParam{
-							ID:    part.ToolInvocation.ToolCallID,
-							Input: json.RawMessage(argsJSON),
-							Name:  part.ToolInvocation.ToolName,
-						},
+						OfToolUse: tub,
 					})
 
 					if part.ToolInvocation.State != ToolInvocationStateResult {
@@ -212,14 +216,18 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						}
 					}
 
+					trb := &anthropic.ToolResultBlockParam{
+						ToolUseID: part.ToolInvocation.ToolCallID,
+						Content:   resultContent,
+					}
+					if part.CacheControl {
+						trb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 					anthropicMessages = append(anthropicMessages, anthropic.MessageParam{
 						Role: anthropic.MessageParamRoleUser,
 						Content: []anthropic.ContentBlockParamUnion{
 							{
-								OfToolResult: &anthropic.ToolResultBlockParam{
-									ToolUseID: part.ToolInvocation.ToolCallID,
-									Content:   resultContent,
-								},
+								OfToolResult: trb,
 							},
 						},
 					})
