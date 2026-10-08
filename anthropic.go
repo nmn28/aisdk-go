@@ -425,11 +425,16 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 				case anthropic.InputJSONDelta:
 					// Accumulate the arguments for the current tool call
 					currentToolCall.Args += delta.PartialJSON
-					if !yield(ToolCallDeltaStreamPart{
-						ToolCallID:    currentToolCall.ID,
-						ArgsTextDelta: delta.PartialJSON,
-					}, nil) {
-						return
+					// Don't emit deltas for server tools — they are handled by the
+					// API, and downstream tool-calling wrappers would try to process
+					// them as regular tool calls (causing empty-name errors).
+					if !currentToolCall.IsServerTool {
+						if !yield(ToolCallDeltaStreamPart{
+							ToolCallID:    currentToolCall.ID,
+							ArgsTextDelta: delta.PartialJSON,
+						}, nil) {
+							return
+						}
 					}
 				case anthropic.ThinkingDelta:
 					if !yield(ReasoningStreamPart{Content: delta.Thinking}, nil) {

@@ -507,3 +507,93 @@ func TestMessagesToAnthropic_Live(t *testing.T) {
 	})
 	require.NoError(t, streamErr)
 }
+
+// TestServerToolUseNoDeltaLeak verifies that InputJSONDelta events for server
+// tools (e.g., web_search) are NOT emitted as ToolCallDeltaStreamPart. Without
+// this, downstream tool-calling wrappers would try to process them as regular
+// tool calls and hit the "empty tool name" error because server tools are
+// skipped in ToolCallStartStreamPart handling.
+func TestServerToolUseNoDeltaLeak(t *testing.T) {
+	t.Parallel()
+
+	// Simulated Anthropic stream with a server_tool_use block (web_search).
+	// The server_tool_use block has an empty Name field (known SDK bug).
+	serverToolStream := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_srv01","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_01ABC","name":"","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"test\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01ABC","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"enc123","page_age":"2d"}]}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Here is the answer."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}
+
+event: message_stop
+data: {"type":"message_stop"}`
+
+	decoder := ssestream.NewDecoder(&http.Response{
+		Body: io.NopCloser(strings.NewReader(serverToolStream)),
+	})
+	typedStream := ssestream.NewStream[anthropic.MessageStreamEventUnion](decoder, nil)
+
+	var parts []aisdk.DataStreamPart
+	stream := aisdk.AnthropicToDataStream(typedStream)
+	for part, err := range stream {
+		require.NoError(t, err)
+		parts = append(parts, part)
+	}
+
+	// Verify: no ToolCallDeltaStreamPart should appear (server tool deltas are suppressed).
+	for _, part := range parts {
+		_, isDelta := part.(aisdk.ToolCallDeltaStreamPart)
+		require.False(t, isDelta, "ToolCallDeltaStreamPart should not be emitted for server tools")
+	}
+
+	// Verify: ToolCallStartStreamPart for the server tool should have IsServerTool=true
+	// and a non-empty name (fallback to "web_search").
+	var foundStart bool
+	for _, part := range parts {
+		if start, ok := part.(aisdk.ToolCallStartStreamPart); ok {
+			foundStart = true
+			require.True(t, start.IsServerTool)
+			require.Equal(t, "web_search", start.ToolName)
+			require.Equal(t, "srvtoolu_01ABC", start.ToolCallID)
+		}
+	}
+	require.True(t, foundStart, "expected ToolCallStartStreamPart for server tool")
+
+	// Verify: WebSearchResultStreamPart should be present.
+	var foundResult bool
+	for _, part := range parts {
+		if ws, ok := part.(aisdk.WebSearchResultStreamPart); ok {
+			foundResult = true
+			require.Equal(t, "srvtoolu_01ABC", ws.ToolCallID)
+			require.Len(t, ws.Results, 1)
+			require.Equal(t, "https://example.com", ws.Results[0].URL)
+		}
+	}
+	require.True(t, foundResult, "expected WebSearchResultStreamPart")
+}
