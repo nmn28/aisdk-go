@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -483,10 +484,10 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 
 					// SDK streaming reconstruction sometimes leaves Name empty
 					// (known bug: anthropic-sdk-python#954, litellm#17254).
-					// Fall back to "web_search" — the only server tool today.
 					serverToolName := string(block.Name)
 					if serverToolName == "" {
-						serverToolName = "web_search"
+						log.Printf("[aisdk-go] ServerToolUseBlock with empty name (id=%s)", block.ID)
+						serverToolName = "unknown_server_tool"
 					}
 
 					if !yield(ToolCallStartStreamPart{
@@ -498,7 +499,10 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					}
 
 				case anthropic.ThinkingBlock:
-					// Thinking block start — content arrives via ThinkingDelta events
+					// Thinking block start — emit marker so taps detect it before first delta
+					if !yield(ReasoningStartStreamPart{}, nil) {
+						return
+					}
 
 				case anthropic.RedactedThinkingBlock:
 					// Redacted thinking — entire content available at start

@@ -164,6 +164,9 @@ func (s DataStream) Pipe(w io.Writer) error {
 			pipeErr = err
 			return false
 		}
+		if formatted == "" {
+			return true // Internal-only part (e.g. ReasoningStartStreamPart)
+		}
 		_, err = fmt.Fprint(w, formatted)
 		if err != nil {
 			pipeErr = err
@@ -210,6 +213,14 @@ func (p ReasoningStreamPart) Format() (string, error) {
 	}
 	return fmt.Sprintf("%c:%s\n", p.TypeID(), string(jsonContent)), nil
 }
+
+// ReasoningStartStreamPart is an internal-only marker emitted when a ThinkingBlock starts.
+// It has no wire format (TypeID 0, empty Format) — it exists so downstream taps can detect
+// the start of a reasoning block before the first ThinkingDelta arrives.
+type ReasoningStartStreamPart struct{}
+
+func (p ReasoningStartStreamPart) TypeID() byte        { return 0 }
+func (p ReasoningStartStreamPart) Format() (string, error) { return "", nil }
 
 // RedactedReasoningStreamPart corresponds to TYPE_ID 'i'.
 type RedactedReasoningStreamPart struct {
@@ -898,6 +909,9 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 			Type: "redacted",
 			Data: p.Data,
 		})
+
+	case ReasoningStartStreamPart:
+		// Internal marker — no accumulation needed
 
 	default:
 		return fmt.Errorf("unhandled part type: %T", part)

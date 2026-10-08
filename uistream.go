@@ -402,6 +402,20 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 			}
 
 			switch p := part.(type) {
+			case ReasoningStartStreamPart:
+				// Close text if active, open reasoning block if needed
+				if textBlockID != "" {
+					if !closeTextBlock() {
+						return
+					}
+				}
+				if reasoningBlockID == "" {
+					reasoningBlockID = genPartID("reasoning")
+					if !yield(UIReasoningStartPart{ID: reasoningBlockID}, nil) {
+						return
+					}
+				}
+
 			case TextStreamPart:
 				// Close reasoning if switching to text
 				if reasoningBlockID != "" {
