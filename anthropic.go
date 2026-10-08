@@ -539,6 +539,23 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					}
 				}
 
+			case anthropic.ContentBlockStopEvent:
+				// When a server tool's content block finishes, emit its accumulated
+				// args as a ToolCallStreamPart so clients see the search query.
+				if currentToolCall.IsServerTool && currentToolCall.Args != "" {
+					var args map[string]any
+					if json.Unmarshal([]byte(currentToolCall.Args), &args) == nil {
+						if !yield(ToolCallStreamPart{
+							ToolCallID:   currentToolCall.ID,
+							ToolName:     "web_search",
+							Args:         args,
+							IsServerTool: true,
+						}, nil) {
+							return
+						}
+					}
+				}
+
 			case anthropic.MessageDeltaEvent:
 				switch event.Delta.StopReason {
 				case "tool_use":

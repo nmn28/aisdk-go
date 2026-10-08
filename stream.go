@@ -349,9 +349,10 @@ func (p ToolCallDeltaStreamPart) Format() (string, error) {
 
 // ToolCallStreamPart corresponds to TYPE_ID '9'.
 type ToolCallStreamPart struct {
-	ToolCallID string         `json:"toolCallId"`
-	ToolName   string         `json:"toolName"`
-	Args       map[string]any `json:"args"`
+	ToolCallID   string         `json:"toolCallId"`
+	ToolName     string         `json:"toolName"`
+	Args         map[string]any `json:"args"`
+	IsServerTool bool           `json:"isServerTool,omitempty"` // True for Anthropic server tools (web_search)
 }
 
 func (p ToolCallStreamPart) TypeID() byte { return '9' }

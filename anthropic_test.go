@@ -585,6 +585,19 @@ data: {"type":"message_stop"}`
 	}
 	require.True(t, foundStart, "expected ToolCallStartStreamPart for server tool")
 
+	// Verify: ToolCallStreamPart emitted at content_block_stop with the query args.
+	var foundToolCall bool
+	for _, part := range parts {
+		if tc, ok := part.(aisdk.ToolCallStreamPart); ok {
+			foundToolCall = true
+			require.True(t, tc.IsServerTool)
+			require.Equal(t, "web_search", tc.ToolName)
+			require.Equal(t, "srvtoolu_01ABC", tc.ToolCallID)
+			require.Equal(t, "test", tc.Args["query"])
+		}
+	}
+	require.True(t, foundToolCall, "expected ToolCallStreamPart with server tool query")
+
 	// Verify: WebSearchResultStreamPart should be present.
 	var foundResult bool
 	for _, part := range parts {
