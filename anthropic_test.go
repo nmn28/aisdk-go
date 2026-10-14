@@ -610,3 +610,89 @@ data: {"type":"message_stop"}`
 	}
 	require.True(t, foundResult, "expected WebSearchResultStreamPart")
 }
+
+// TestCacheControlToolLoopMax4 verifies that a 3-iteration tool loop
+// with CacheControl on tool result Parts never produces >4 Anthropic
+// cache_control markers (2 system + 1 tools + 1 last message).
+func TestCacheControlToolLoopMax4(t *testing.T) {
+	t.Parallel()
+
+	// Simulate what ai_stream.go builds across 3 tool-loop iterations.
+	// System: 2 text blocks with CacheControl.
+	// Messages: after each iteration, the last Part gets CacheControl (via setFinalMessageCacheMarker).
+	// Tools: ToolsToAnthropic adds 1 marker on the last tool.
+
+	systemParts := []aisdk.Part{
+		{Type: aisdk.PartTypeText, Text: "System prompt block 0", CacheControl: true},
+		{Type: aisdk.PartTypeText, Text: "System prompt block 1", CacheControl: true},
+	}
+
+	// Build 3 turns of tool calls with results, mimicking acc.Messages() output.
+	// Each assistant message has a ToolInvocation Part with State=Result.
+	// Only the LAST Part should have CacheControl (simulating setFinalMessageCacheMarker).
+	var toolMessages []aisdk.Message
+	for i := 0; i < 3; i++ {
+		toolMessages = append(toolMessages, aisdk.Message{
+			Role: "assistant",
+			Parts: []aisdk.Part{
+				{
+					Type: aisdk.PartTypeToolInvocation,
+					ToolInvocation: &aisdk.ToolInvocation{
+						State:      aisdk.ToolInvocationStateResult,
+						ToolCallID: "call_" + string(rune('A'+i)),
+						ToolName:   "test_tool",
+						Args:       map[string]any{"q": "test"},
+						Result:     map[string]any{"answer": "ok"},
+					},
+					// Only the very last part across all messages should have CacheControl
+					CacheControl: i == 2,
+				},
+			},
+		})
+	}
+
+	allMessages := append([]aisdk.Message{
+		{Role: "system", Parts: systemParts},
+		{Role: "user", Parts: []aisdk.Part{{Type: aisdk.PartTypeText, Text: "Hello"}}},
+	}, toolMessages...)
+
+	anthropicMsgs, systemBlocks, err := aisdk.MessagesToAnthropic(allMessages)
+	require.NoError(t, err)
+
+	// Count all cache_control markers across system blocks + messages
+	ccCount := 0
+	for _, sb := range systemBlocks {
+		if sb.CacheControl.Type != "" {
+			ccCount++
+		}
+	}
+	for _, msg := range anthropicMsgs {
+		for _, block := range msg.Content {
+			if block.OfText != nil && block.OfText.CacheControl.Type != "" {
+				ccCount++
+			}
+			if block.OfToolUse != nil && block.OfToolUse.CacheControl.Type != "" {
+				ccCount++
+			}
+			if block.OfToolResult != nil && block.OfToolResult.CacheControl.Type != "" {
+				ccCount++
+			}
+		}
+	}
+
+	// +1 for ToolsToAnthropic (not called here, but counted in the budget)
+	// So message+system markers must be <= 3 to leave room for the tool marker.
+	require.LessOrEqual(t, ccCount, 3,
+		"system + message cache_control markers must be <= 3 (leaves 1 for tools); got %d", ccCount)
+
+	// Specifically verify: the last tool_result has CacheControl, but its
+	// corresponding tool_use does NOT (that was the double-count bug).
+	for _, msg := range anthropicMsgs {
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil && block.OfToolUse.CacheControl.Type != "" {
+				t.Errorf("tool_use block %s should NOT have CacheControl when its Part also produces a tool_result",
+					block.OfToolUse.ID)
+			}
+		}
+	}
+}

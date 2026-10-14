@@ -175,7 +175,11 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						Input: json.RawMessage(argsJSON),
 						Name:  part.ToolInvocation.ToolName,
 					}
-					if part.CacheControl {
+					// Only set CacheControl on tool_use when it WON'T also produce
+					// a tool_result block (state != Result).  When state == Result,
+					// the same Part's CacheControl goes on the tool_result instead,
+					// avoiding a double-count that exceeds Anthropic's 4-marker limit.
+					if part.CacheControl && part.ToolInvocation.State != ToolInvocationStateResult {
 						tub.CacheControl = anthropic.NewCacheControlEphemeralParam()
 					}
 					content = append(content, anthropic.ContentBlockParamUnion{
