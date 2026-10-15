@@ -104,7 +104,7 @@ data: [DONE]`
 
 	// 5. Assert accumulator state
 	// Use EqualExportedValues to ignore internal fields like 'isComplete' in Part
-	require.EqualExportedValues(t, expectedMessages, acc.Messages())
+	require.EqualExportedValues(t, expectedMessages, stripTimestamps(acc.Messages()))
 	require.Equal(t, expectedFinishReason, acc.FinishReason())
 	require.Equal(t, expectedUsage, acc.Usage())
 

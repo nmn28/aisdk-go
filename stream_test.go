@@ -72,7 +72,8 @@ func TestDataStreamAccumulator_SimpleText(t *testing.T) {
 		t.Fatalf("Expected 1 message, got %d", len(messages))
 	}
 
-	require.Equal(t, expectedMessage, messages[0])
+	stripped := stripTimestamps(messages)
+	require.Equal(t, expectedMessage, stripped[0])
 
 	if acc.FinishReason() != aisdk.FinishReasonStop {
 		t.Errorf("Expected finish reason %q, got %q", aisdk.FinishReasonStop, acc.FinishReason())
@@ -85,6 +86,22 @@ func TestDataStreamAccumulator_SimpleText(t *testing.T) {
 // Helper function to create a pointer to an int64
 func int64Ptr(i int64) *int64 {
 	return &i
+}
+
+// stripTimestamps zeros out StartedMs/EndedMs on all parts for deterministic test comparisons.
+func stripTimestamps(messages []aisdk.Message) []aisdk.Message {
+	out := make([]aisdk.Message, len(messages))
+	for i, m := range messages {
+		parts := make([]aisdk.Part, len(m.Parts))
+		copy(parts, m.Parts)
+		for j := range parts {
+			parts[j].StartedMs = 0
+			parts[j].EndedMs = 0
+		}
+		out[i] = m
+		out[i].Parts = parts
+	}
+	return out
 }
 
 func TestDataStreamAccumulator_ToolCall(t *testing.T) {
@@ -137,6 +154,6 @@ func TestDataStreamAccumulator_ToolCall(t *testing.T) {
 	}
 
 	messages := acc.Messages()
-	require.EqualExportedValues(t, expectedMessages, messages)
+	require.EqualExportedValues(t, expectedMessages, stripTimestamps(messages))
 	require.Equal(t, int64Ptr(90), acc.Usage().CompletionTokens)
 }

@@ -260,15 +260,8 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 								})
 							}
 						}
-					} else if part.Reasoning != "" {
-						// Legacy fallback: single reasoning text without details
-						content = append(content, anthropic.ContentBlockParamUnion{
-							OfThinking: &anthropic.ThinkingBlockParam{
-								Thinking:  part.Reasoning,
-								Signature: "", // Will be rejected by API — caller must provide details
-							},
-						})
 					}
+					// No fallback for empty Details — sending empty signature causes 400
 
 				case PartTypeServerToolUse:
 					// Round-trip server_tool_use blocks for multi-turn

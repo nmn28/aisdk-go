@@ -6,6 +6,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"time"
 )
 
 // Chat is the structure sent from `useChat` to the server.
@@ -217,10 +218,14 @@ func (p ReasoningStreamPart) Format() (string, error) {
 // ReasoningStartStreamPart is an internal-only marker emitted when a ThinkingBlock starts.
 // It has no wire format (TypeID 0, empty Format) — it exists so downstream taps can detect
 // the start of a reasoning block before the first ThinkingDelta arrives.
-type ReasoningStartStreamPart struct{}
+// ID is the block identifier assigned by the stream producer; if empty, downstream
+// consumers (DataStreamToUIMessageStream, accumulator) generate one.
+type ReasoningStartStreamPart struct {
+	ID string
+}
 
-func (p ReasoningStartStreamPart) TypeID() byte        { return 0 }
-func (p ReasoningStartStreamPart) Format() (string, error) { return "", nil }
+func (p ReasoningStartStreamPart) TypeID() byte              { return 0 }
+func (p ReasoningStartStreamPart) Format() (string, error)   { return "", nil }
 
 // RedactedReasoningStreamPart corresponds to TYPE_ID 'i'.
 type RedactedReasoningStreamPart struct {
@@ -491,6 +496,10 @@ type SourceInfo struct {
 type Part struct {
 	Type PartType `json:"type"`
 
+	// ID is the block identifier for reasoning/text parts, or toolCallId for tool-invocation parts.
+	// Used to correlate headlines, timestamps, and persisted parts across live stream and reload.
+	ID string `json:"id,omitempty"`
+
 	// Type: "text"
 	Text     string     `json:"text,omitempty"`
 	Citations []Citation `json:"citations,omitempty"` // Inline citations from web search
@@ -610,6 +619,11 @@ type DataStreamAccumulator struct {
 	wipToolCalls   map[string]*Part // Keyed by ToolCallID, points to Part in currentMessage.Parts
 	finishReason   FinishReason
 	usage          Usage
+
+	// Per-block reasoning tracking: index of the current reasoning Part in currentMessage.Parts.
+	// -1 means no active reasoning block.
+	currentReasoningIdx int
+	reasoningBlockCount int // counter for generating IDs when ReasoningStartStreamPart.ID is empty
 }
 
 func (a *DataStreamAccumulator) ensureCurrentMessage() {
@@ -619,6 +633,7 @@ func (a *DataStreamAccumulator) ensureCurrentMessage() {
 			Parts: make([]Part, 0, 5),
 		}
 		a.wipToolCalls = make(map[string]*Part)
+		a.currentReasoningIdx = -1
 	}
 }
 
@@ -651,14 +666,23 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add TextStreamPart without an active message")
 		}
+		// Close any active reasoning block (text after reasoning ends the block)
+		if a.currentReasoningIdx >= 0 && a.currentReasoningIdx < len(currentMsgPtr.Parts) {
+			rp := &currentMsgPtr.Parts[a.currentReasoningIdx]
+			if rp.EndedMs == 0 {
+				rp.EndedMs = time.Now().UnixMilli()
+			}
+			a.currentReasoningIdx = -1
+		}
 		currentMsgPtr.Content += p.Content
 		numParts := len(currentMsgPtr.Parts)
 		if numParts > 0 && currentMsgPtr.Parts[numParts-1].Type == PartTypeText {
 			currentMsgPtr.Parts[numParts-1].Text += p.Content
 		} else {
 			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{
-				Type: PartTypeText,
-				Text: p.Content,
+				Type:      PartTypeText,
+				Text:      p.Content,
+				StartedMs: time.Now().UnixMilli(),
 			})
 		}
 
@@ -666,18 +690,19 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add ReasoningStreamPart without an active message")
 		}
-		var reasoningPart *Part
-		for i := range currentMsgPtr.Parts {
-			if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
-				reasoningPart = &currentMsgPtr.Parts[i]
-				break
-			}
+		// If no active reasoning block, start one (handles providers that emit
+		// ReasoningStreamPart without a preceding ReasoningStartStreamPart).
+		if a.currentReasoningIdx < 0 || a.currentReasoningIdx >= len(currentMsgPtr.Parts) {
+			a.reasoningBlockCount++
+			id := fmt.Sprintf("reasoning_%d", a.reasoningBlockCount)
+			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{
+				Type:      PartTypeReasoning,
+				ID:        id,
+				StartedMs: time.Now().UnixMilli(),
+			})
+			a.currentReasoningIdx = len(currentMsgPtr.Parts) - 1
 		}
-		if reasoningPart == nil {
-			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{Type: PartTypeReasoning})
-			reasoningPart = &currentMsgPtr.Parts[len(currentMsgPtr.Parts)-1]
-		}
-		reasoningPart.Reasoning += p.Content
+		currentMsgPtr.Parts[a.currentReasoningIdx].Reasoning += p.Content
 
 	case FileStreamPart:
 		if currentMsgPtr == nil {
@@ -734,6 +759,14 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add ToolCallStartStreamPart without an active message")
 		}
+		// Close any active reasoning block
+		if a.currentReasoningIdx >= 0 && a.currentReasoningIdx < len(currentMsgPtr.Parts) {
+			rp := &currentMsgPtr.Parts[a.currentReasoningIdx]
+			if rp.EndedMs == 0 {
+				rp.EndedMs = time.Now().UnixMilli()
+			}
+			a.currentReasoningIdx = -1
+		}
 		// Initialize a new tool call. Args starts as empty string for delta
 		// concatenation during streaming; converted to object before API replay.
 		newPart := Part{
@@ -744,6 +777,7 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 				ToolName:   p.ToolName,
 				Args:       "",
 			},
+			StartedMs:  time.Now().UnixMilli(),
 			isComplete: false,
 		}
 		currentMsgPtr.Parts = append(currentMsgPtr.Parts, newPart)
@@ -796,6 +830,7 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if existingPart != nil && existingPart.ToolInvocation != nil {
 			existingPart.ToolInvocation.State = ToolInvocationStateResult
 			existingPart.ToolInvocation.Result = p.Result
+			existingPart.EndedMs = time.Now().UnixMilli()
 		} else {
 			return fmt.Errorf("tool result received for unknown tool call ID: %s", p.ToolCallID)
 		}
@@ -814,6 +849,14 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 
 	case FinishStepStreamPart:
 		if currentMsgPtr != nil {
+			// Close any open reasoning block
+			if a.currentReasoningIdx >= 0 && a.currentReasoningIdx < len(currentMsgPtr.Parts) {
+				rp := &currentMsgPtr.Parts[a.currentReasoningIdx]
+				if rp.EndedMs == 0 {
+					rp.EndedMs = time.Now().UnixMilli()
+				}
+				a.currentReasoningIdx = -1
+			}
 			// Clean up any remaining WIP tool calls
 			for id, wipCallPart := range a.wipToolCalls {
 				if !wipCallPart.isComplete && wipCallPart.ToolInvocation != nil {
@@ -879,43 +922,79 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add ReasoningSignatureStreamPart without an active message")
 		}
-		// Find the last reasoning part and finalize its details with the signature.
+		// Attach signature to the current (last) reasoning block.
 		// The signature marks the end of a thinking block, so we wrap accumulated
 		// reasoning text into a detail entry with the signature attached.
-		for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
-			if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
-				currentMsgPtr.Parts[i].Details = append(currentMsgPtr.Parts[i].Details, ReasoningDetail{
-					Type:      "text",
-					Text:      currentMsgPtr.Parts[i].Reasoning,
-					Signature: p.Signature,
-				})
-				break
+		idx := a.currentReasoningIdx
+		if idx < 0 {
+			// Fallback: find last reasoning part
+			for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
+				if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
+					idx = i
+					break
+				}
 			}
+		}
+		if idx >= 0 && idx < len(currentMsgPtr.Parts) {
+			rp := &currentMsgPtr.Parts[idx]
+			rp.Details = append(rp.Details, ReasoningDetail{
+				Type:      "text",
+				Text:      rp.Reasoning,
+				Signature: p.Signature,
+			})
+			// Close the block — signature marks end
+			if rp.EndedMs == 0 {
+				rp.EndedMs = time.Now().UnixMilli()
+			}
+			a.currentReasoningIdx = -1
 		}
 
 	case RedactedReasoningStreamPart:
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add RedactedReasoningStreamPart without an active message")
 		}
-		// Ensure a reasoning part exists to attach the redacted detail to.
-		var reasoningPart *Part
-		for i := len(currentMsgPtr.Parts) - 1; i >= 0; i-- {
-			if currentMsgPtr.Parts[i].Type == PartTypeReasoning {
-				reasoningPart = &currentMsgPtr.Parts[i]
-				break
-			}
+		// Attach to current reasoning block, or create one if none active.
+		idx := a.currentReasoningIdx
+		if idx < 0 {
+			// No active block — create one for the redacted detail
+			a.reasoningBlockCount++
+			id := fmt.Sprintf("reasoning_%d", a.reasoningBlockCount)
+			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{
+				Type:      PartTypeReasoning,
+				ID:        id,
+				StartedMs: time.Now().UnixMilli(),
+			})
+			idx = len(currentMsgPtr.Parts) - 1
+			a.currentReasoningIdx = idx
 		}
-		if reasoningPart == nil {
-			currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{Type: PartTypeReasoning})
-			reasoningPart = &currentMsgPtr.Parts[len(currentMsgPtr.Parts)-1]
-		}
-		reasoningPart.Details = append(reasoningPart.Details, ReasoningDetail{
+		currentMsgPtr.Parts[idx].Details = append(currentMsgPtr.Parts[idx].Details, ReasoningDetail{
 			Type: "redacted",
 			Data: p.Data,
 		})
 
 	case ReasoningStartStreamPart:
-		// Internal marker — no accumulation needed
+		if currentMsgPtr == nil {
+			break
+		}
+		// Close previous reasoning block if still open
+		if a.currentReasoningIdx >= 0 && a.currentReasoningIdx < len(currentMsgPtr.Parts) {
+			rp := &currentMsgPtr.Parts[a.currentReasoningIdx]
+			if rp.EndedMs == 0 {
+				rp.EndedMs = time.Now().UnixMilli()
+			}
+		}
+		// Start a new reasoning block
+		id := p.ID
+		if id == "" {
+			a.reasoningBlockCount++
+			id = fmt.Sprintf("reasoning_%d", a.reasoningBlockCount)
+		}
+		currentMsgPtr.Parts = append(currentMsgPtr.Parts, Part{
+			Type:      PartTypeReasoning,
+			ID:        id,
+			StartedMs: time.Now().UnixMilli(),
+		})
+		a.currentReasoningIdx = len(currentMsgPtr.Parts) - 1
 
 	default:
 		return fmt.Errorf("unhandled part type: %T", part)

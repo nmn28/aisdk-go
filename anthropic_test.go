@@ -106,7 +106,7 @@ data: {"type":"message_stop" }`
 		},
 	}
 
-	require.EqualExportedValues(t, expectedMessages, acc.Messages())
+	require.EqualExportedValues(t, expectedMessages, stripTimestamps(acc.Messages()))
 
 	// --- Add conversion back check ---
 	anthropicMsgs, systemPrompts, err := aisdk.MessagesToAnthropic(acc.Messages())
