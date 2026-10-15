@@ -283,6 +283,28 @@ func (p UIErrorPart) UIStreamJSON() ([]byte, error) {
 	}{"error", p.ErrorText})
 }
 
+// --- Custom Data Events ---
+
+// UIDataPart carries custom data events (data-*) through the Pipe so ALL frames
+// go through a single write path. The AI SDK schema allows any type starting
+// with "data-" plus {id?, data, transient?}.
+type UIDataPart struct {
+	DataType  string `json:"-"`          // e.g. "data-step-timing"
+	ID        string `json:"id,omitempty"`
+	Data      any    `json:"data"`
+	Transient bool   `json:"transient,omitempty"`
+}
+
+func (p UIDataPart) UIStreamType() string { return p.DataType }
+func (p UIDataPart) UIStreamJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type      string `json:"type"`
+		ID        string `json:"id,omitempty"`
+		Data      any    `json:"data"`
+		Transient bool   `json:"transient,omitempty"`
+	}{p.DataType, p.ID, p.Data, p.Transient})
+}
+
 // --- Done Marker ---
 
 // UIDonePart is the terminal [DONE] marker.
@@ -342,34 +364,37 @@ func (s UIMessageStream) Pipe(w io.Writer) error {
 	return pipeErr
 }
 
-// WithTimingEvents wraps a UIMessageStream to emit data-step-timing SSE events
-// as a side channel whenever reasoning or tool blocks start/end. The standard
-// v6 parts pass through UNMODIFIED — timing never pollutes the schema.
-func WithTimingEvents(us UIMessageStream, w io.Writer) UIMessageStream {
+// WithTimingEvents wraps a UIMessageStream to yield data-step-timing events
+// through the Pipe alongside standard parts. Standard parts pass through
+// UNMODIFIED; timing is a separate UIDataPart yielded after each block event.
+func WithTimingEvents(us UIMessageStream) UIMessageStream {
 	return func(yield func(UIMessageStreamPart, error) bool) {
 		us(func(part UIMessageStreamPart, err error) bool {
 			if err != nil {
 				return yield(part, err)
 			}
 			now := time.Now().UnixMilli()
-			// Pass standard part through first, then emit timing event
 			switch p := part.(type) {
 			case UIReasoningStartPart:
-				cont := yield(part, nil)
-				writeStepTimingEvent(w, p.ID, now, 0)
-				return cont
+				if !yield(part, nil) {
+					return false
+				}
+				return yield(stepTimingPart(p.ID, now, 0), nil)
 			case UIReasoningEndPart:
-				cont := yield(part, nil)
-				writeStepTimingEvent(w, p.ID, 0, now)
-				return cont
+				if !yield(part, nil) {
+					return false
+				}
+				return yield(stepTimingPart(p.ID, 0, now), nil)
 			case UIToolInputStartPart:
-				cont := yield(part, nil)
-				writeStepTimingEvent(w, p.ToolCallID, now, 0)
-				return cont
+				if !yield(part, nil) {
+					return false
+				}
+				return yield(stepTimingPart(p.ToolCallID, now, 0), nil)
 			case UIToolOutputAvailablePart:
-				cont := yield(part, nil)
-				writeStepTimingEvent(w, p.ToolCallID, 0, now)
-				return cont
+				if !yield(part, nil) {
+					return false
+				}
+				return yield(stepTimingPart(p.ToolCallID, 0, now), nil)
 			default:
 				return yield(part, nil)
 			}
@@ -377,22 +402,16 @@ func WithTimingEvents(us UIMessageStream, w io.Writer) UIMessageStream {
 	}
 }
 
-// writeStepTimingEvent emits a data-step-timing SSE event to the writer.
-func writeStepTimingEvent(w io.Writer, id string, startedMs, endedMs int64) {
-	data, _ := json.Marshal(struct {
-		Type string `json:"type"`
-		Data any    `json:"data"`
-	}{
-		Type: "data-step-timing",
+// stepTimingPart creates a UIDataPart for data-step-timing.
+func stepTimingPart(id string, startedMs, endedMs int64) UIDataPart {
+	return UIDataPart{
+		DataType:  "data-step-timing",
+		Transient: true,
 		Data: struct {
 			ID        string `json:"id"`
 			StartedMs int64  `json:"startedMs,omitempty"`
 			EndedMs   int64  `json:"endedMs,omitempty"`
 		}{id, startedMs, endedMs},
-	})
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	if f, ok := w.(interface{ Flush() }); ok {
-		f.Flush()
 	}
 }
 
