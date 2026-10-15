@@ -240,6 +240,11 @@ func OpenAIResponsesToDataStream(stream *ssestream.Stream[responses.ResponseStre
 					tokens := int64(resp.Usage.OutputTokens)
 					finalUsage.CompletionTokens = &tokens
 				}
+				if resp.Usage.InputTokensDetails.JSON.CachedTokens.Valid() &&
+					resp.Usage.InputTokensDetails.CachedTokens > 0 {
+					tokens := resp.Usage.InputTokensDetails.CachedTokens
+					finalUsage.CacheReadInputTokens = &tokens
+				}
 
 				if !yield(FinishStepStreamPart{
 					FinishReason: finalReason,
