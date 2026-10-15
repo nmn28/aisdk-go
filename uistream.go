@@ -100,17 +100,15 @@ func (p UITextEndPart) UIStreamJSON() ([]byte, error) {
 
 // UIReasoningStartPart opens a reasoning/thinking block.
 type UIReasoningStartPart struct {
-	ID        string `json:"id"`
-	StartedMs int64  `json:"startedMs,omitempty"`
+	ID string `json:"id"`
 }
 
 func (p UIReasoningStartPart) UIStreamType() string { return "reasoning-start" }
 func (p UIReasoningStartPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type      string `json:"type"`
-		ID        string `json:"id"`
-		StartedMs int64  `json:"startedMs,omitempty"`
-	}{"reasoning-start", p.ID, p.StartedMs})
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	}{"reasoning-start", p.ID})
 }
 
 // UIReasoningDeltaPart streams a reasoning text chunk.
@@ -130,17 +128,15 @@ func (p UIReasoningDeltaPart) UIStreamJSON() ([]byte, error) {
 
 // UIReasoningEndPart closes a reasoning block.
 type UIReasoningEndPart struct {
-	ID      string `json:"id"`
-	EndedMs int64  `json:"endedMs,omitempty"`
+	ID string `json:"id"`
 }
 
 func (p UIReasoningEndPart) UIStreamType() string { return "reasoning-end" }
 func (p UIReasoningEndPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type    string `json:"type"`
-		ID      string `json:"id"`
-		EndedMs int64  `json:"endedMs,omitempty"`
-	}{"reasoning-end", p.ID, p.EndedMs})
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	}{"reasoning-end", p.ID})
 }
 
 // --- Tool Execution Events ---
@@ -149,7 +145,6 @@ func (p UIReasoningEndPart) UIStreamJSON() ([]byte, error) {
 type UIToolInputStartPart struct {
 	ToolCallID string `json:"toolCallId"`
 	ToolName   string `json:"toolName"`
-	StartedMs  int64  `json:"startedMs,omitempty"`
 }
 
 func (p UIToolInputStartPart) UIStreamType() string { return "tool-input-start" }
@@ -158,8 +153,7 @@ func (p UIToolInputStartPart) UIStreamJSON() ([]byte, error) {
 		Type       string `json:"type"`
 		ToolCallID string `json:"toolCallId"`
 		ToolName   string `json:"toolName"`
-		StartedMs  int64  `json:"startedMs,omitempty"`
-	}{"tool-input-start", p.ToolCallID, p.ToolName, p.StartedMs})
+	}{"tool-input-start", p.ToolCallID, p.ToolName})
 }
 
 // UIToolInputDeltaPart streams a chunk of tool input arguments.
@@ -198,7 +192,6 @@ func (p UIToolInputAvailablePart) UIStreamJSON() ([]byte, error) {
 type UIToolOutputAvailablePart struct {
 	ToolCallID string `json:"toolCallId"`
 	Output     any    `json:"output"`
-	EndedMs    int64  `json:"endedMs,omitempty"`
 }
 
 func (p UIToolOutputAvailablePart) UIStreamType() string { return "tool-output-available" }
@@ -207,8 +200,7 @@ func (p UIToolOutputAvailablePart) UIStreamJSON() ([]byte, error) {
 		Type       string `json:"type"`
 		ToolCallID string `json:"toolCallId"`
 		Output     any    `json:"output"`
-		EndedMs    int64  `json:"endedMs,omitempty"`
-	}{"tool-output-available", p.ToolCallID, p.Output, p.EndedMs})
+	}{"tool-output-available", p.ToolCallID, p.Output})
 }
 
 // --- Source Events ---
@@ -350,32 +342,57 @@ func (s UIMessageStream) Pipe(w io.Writer) error {
 	return pipeErr
 }
 
-// WithTimestamps wraps a UIMessageStream to inject server wall-clock timestamps
-// on reasoning-start, reasoning-end, tool-input-start, and tool-output-available parts.
-func WithTimestamps(us UIMessageStream) UIMessageStream {
+// WithTimingEvents wraps a UIMessageStream to emit data-step-timing SSE events
+// as a side channel whenever reasoning or tool blocks start/end. The standard
+// v6 parts pass through UNMODIFIED — timing never pollutes the schema.
+func WithTimingEvents(us UIMessageStream, w io.Writer) UIMessageStream {
 	return func(yield func(UIMessageStreamPart, error) bool) {
 		us(func(part UIMessageStreamPart, err error) bool {
 			if err != nil {
 				return yield(part, err)
 			}
 			now := time.Now().UnixMilli()
+			// Pass standard part through first, then emit timing event
 			switch p := part.(type) {
 			case UIReasoningStartPart:
-				p.StartedMs = now
-				return yield(p, nil)
+				cont := yield(part, nil)
+				writeStepTimingEvent(w, p.ID, now, 0)
+				return cont
 			case UIReasoningEndPart:
-				p.EndedMs = now
-				return yield(p, nil)
+				cont := yield(part, nil)
+				writeStepTimingEvent(w, p.ID, 0, now)
+				return cont
 			case UIToolInputStartPart:
-				p.StartedMs = now
-				return yield(p, nil)
+				cont := yield(part, nil)
+				writeStepTimingEvent(w, p.ToolCallID, now, 0)
+				return cont
 			case UIToolOutputAvailablePart:
-				p.EndedMs = now
-				return yield(p, nil)
+				cont := yield(part, nil)
+				writeStepTimingEvent(w, p.ToolCallID, 0, now)
+				return cont
 			default:
 				return yield(part, nil)
 			}
 		})
+	}
+}
+
+// writeStepTimingEvent emits a data-step-timing SSE event to the writer.
+func writeStepTimingEvent(w io.Writer, id string, startedMs, endedMs int64) {
+	data, _ := json.Marshal(struct {
+		Type string `json:"type"`
+		Data any    `json:"data"`
+	}{
+		Type: "data-step-timing",
+		Data: struct {
+			ID        string `json:"id"`
+			StartedMs int64  `json:"startedMs,omitempty"`
+			EndedMs   int64  `json:"endedMs,omitempty"`
+		}{id, startedMs, endedMs},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	if f, ok := w.(interface{ Flush() }); ok {
+		f.Flush()
 	}
 }
 
