@@ -523,6 +523,10 @@ type Part struct {
 	// CacheControl signals the Anthropic adapter to set cache_control: ephemeral on this block.
 	CacheControl bool `json:"-"`
 
+	// Timing — server wall-clock milliseconds (Unix epoch). Present on reasoning and tool-invocation parts.
+	StartedMs int64 `json:"startedMs,omitempty"`
+	EndedMs   int64 `json:"endedMs,omitempty"`
+
 	// Type: "step-start" - No additional fields
 
 	isComplete bool `json:"-"` // Internal accumulator tracking

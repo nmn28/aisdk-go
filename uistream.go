@@ -6,6 +6,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -99,15 +100,17 @@ func (p UITextEndPart) UIStreamJSON() ([]byte, error) {
 
 // UIReasoningStartPart opens a reasoning/thinking block.
 type UIReasoningStartPart struct {
-	ID string `json:"id"`
+	ID        string `json:"id"`
+	StartedMs int64  `json:"startedMs,omitempty"`
 }
 
 func (p UIReasoningStartPart) UIStreamType() string { return "reasoning-start" }
 func (p UIReasoningStartPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-	}{"reasoning-start", p.ID})
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		StartedMs int64  `json:"startedMs,omitempty"`
+	}{"reasoning-start", p.ID, p.StartedMs})
 }
 
 // UIReasoningDeltaPart streams a reasoning text chunk.
@@ -127,15 +130,17 @@ func (p UIReasoningDeltaPart) UIStreamJSON() ([]byte, error) {
 
 // UIReasoningEndPart closes a reasoning block.
 type UIReasoningEndPart struct {
-	ID string `json:"id"`
+	ID      string `json:"id"`
+	EndedMs int64  `json:"endedMs,omitempty"`
 }
 
 func (p UIReasoningEndPart) UIStreamType() string { return "reasoning-end" }
 func (p UIReasoningEndPart) UIStreamJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-	}{"reasoning-end", p.ID})
+		Type    string `json:"type"`
+		ID      string `json:"id"`
+		EndedMs int64  `json:"endedMs,omitempty"`
+	}{"reasoning-end", p.ID, p.EndedMs})
 }
 
 // --- Tool Execution Events ---
@@ -144,6 +149,7 @@ func (p UIReasoningEndPart) UIStreamJSON() ([]byte, error) {
 type UIToolInputStartPart struct {
 	ToolCallID string `json:"toolCallId"`
 	ToolName   string `json:"toolName"`
+	StartedMs  int64  `json:"startedMs,omitempty"`
 }
 
 func (p UIToolInputStartPart) UIStreamType() string { return "tool-input-start" }
@@ -152,7 +158,8 @@ func (p UIToolInputStartPart) UIStreamJSON() ([]byte, error) {
 		Type       string `json:"type"`
 		ToolCallID string `json:"toolCallId"`
 		ToolName   string `json:"toolName"`
-	}{"tool-input-start", p.ToolCallID, p.ToolName})
+		StartedMs  int64  `json:"startedMs,omitempty"`
+	}{"tool-input-start", p.ToolCallID, p.ToolName, p.StartedMs})
 }
 
 // UIToolInputDeltaPart streams a chunk of tool input arguments.
@@ -191,6 +198,7 @@ func (p UIToolInputAvailablePart) UIStreamJSON() ([]byte, error) {
 type UIToolOutputAvailablePart struct {
 	ToolCallID string `json:"toolCallId"`
 	Output     any    `json:"output"`
+	EndedMs    int64  `json:"endedMs,omitempty"`
 }
 
 func (p UIToolOutputAvailablePart) UIStreamType() string { return "tool-output-available" }
@@ -199,7 +207,8 @@ func (p UIToolOutputAvailablePart) UIStreamJSON() ([]byte, error) {
 		Type       string `json:"type"`
 		ToolCallID string `json:"toolCallId"`
 		Output     any    `json:"output"`
-	}{"tool-output-available", p.ToolCallID, p.Output})
+		EndedMs    int64  `json:"endedMs,omitempty"`
+	}{"tool-output-available", p.ToolCallID, p.Output, p.EndedMs})
 }
 
 // --- Source Events ---
@@ -339,6 +348,35 @@ func (s UIMessageStream) Pipe(w io.Writer) error {
 		return true
 	})
 	return pipeErr
+}
+
+// WithTimestamps wraps a UIMessageStream to inject server wall-clock timestamps
+// on reasoning-start, reasoning-end, tool-input-start, and tool-output-available parts.
+func WithTimestamps(us UIMessageStream) UIMessageStream {
+	return func(yield func(UIMessageStreamPart, error) bool) {
+		us(func(part UIMessageStreamPart, err error) bool {
+			if err != nil {
+				return yield(part, err)
+			}
+			now := time.Now().UnixMilli()
+			switch p := part.(type) {
+			case UIReasoningStartPart:
+				p.StartedMs = now
+				return yield(p, nil)
+			case UIReasoningEndPart:
+				p.EndedMs = now
+				return yield(p, nil)
+			case UIToolInputStartPart:
+				p.StartedMs = now
+				return yield(p, nil)
+			case UIToolOutputAvailablePart:
+				p.EndedMs = now
+				return yield(p, nil)
+			default:
+				return yield(part, nil)
+			}
+		})
+	}
 }
 
 // DataStreamToUIMessageStream converts a v4 DataStream into a v6 UIMessageStream.
