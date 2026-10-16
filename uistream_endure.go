@@ -157,6 +157,20 @@ func WithTitleInjection(stream UIMessageStream, titleFunc func() (title string, 
 	}
 }
 
+// WithoutDone strips the terminal [DONE] marker from a UIMessageStream.
+// Use this when the caller needs to write additional events (e.g. data-persisted)
+// after the stream's finish event but before closing the connection.
+func WithoutDone(stream UIMessageStream) UIMessageStream {
+	return func(yield func(UIMessageStreamPart, error) bool) {
+		stream(func(part UIMessageStreamPart, err error) bool {
+			if _, ok := part.(UIDonePart); ok {
+				return true // swallow [DONE]
+			}
+			return yield(part, err)
+		})
+	}
+}
+
 // PipeEndureStream is a convenience function that writes a DataStream as a v6
 // UI Message Stream with Endure's custom headers and optional title injection.
 //
