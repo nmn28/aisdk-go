@@ -2,6 +2,7 @@ package aisdk
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -409,6 +410,108 @@ func TestPipeEndureStream_FullIntegration(t *testing.T) {
 	assert.Contains(t, body, `"type":"data-endure-title"`)
 	assert.Contains(t, body, `"Weather chat"`)
 	assert.True(t, strings.HasSuffix(strings.TrimSpace(body), "data: [DONE]"))
+}
+
+// TestV6StrictKeys verifies that every UIMessageStreamPart produces JSON
+// containing ONLY the keys allowed by the AI SDK v6 strictObject() schema.
+// This is the D14 contract test — if a new field is added to a part struct's
+// MarshalJSON, this test will catch it before production 400s.
+func TestV6StrictKeys(t *testing.T) {
+	// Allowed keys per chunk type, matching STREAM_CONTRACT.md exactly.
+	allowedKeys := map[string][]string{
+		"start":                {"type", "messageId", "messageMetadata"},
+		"start-step":           {"type"},
+		"text-start":           {"type", "id", "providerMetadata"},
+		"text-delta":           {"type", "id", "delta", "providerMetadata"},
+		"text-end":             {"type", "id", "providerMetadata"},
+		"reasoning-start":      {"type", "id", "providerMetadata"},
+		"reasoning-delta":      {"type", "id", "delta", "providerMetadata"},
+		"reasoning-end":        {"type", "id", "providerMetadata"},
+		"tool-input-start":     {"type", "toolCallId", "toolName", "providerExecuted", "dynamic", "title"},
+		"tool-input-delta":     {"type", "toolCallId", "inputTextDelta"},
+		"tool-input-available": {"type", "toolCallId", "toolName", "input", "providerExecuted", "providerMetadata", "dynamic", "title"},
+		"tool-output-available": {"type", "toolCallId", "output", "providerExecuted", "dynamic", "preliminary"},
+		"source-url":           {"type", "sourceId", "url", "title", "providerMetadata"},
+		"file":                 {"type", "url", "mediaType", "providerMetadata"},
+		"finish-step":          {"type"},
+		"finish":               {"type", "finishReason", "messageMetadata"},
+		"error":                {"type", "errorText"},
+	}
+
+	// Every concrete part we emit, with representative field values.
+	parts := []UIMessageStreamPart{
+		UIStartPart{MessageID: "msg_1"},
+		UIStartStepPart{},
+		UITextStartPart{ID: "t_1"},
+		UITextDeltaPart{ID: "t_1", Delta: "hello"},
+		UITextEndPart{ID: "t_1"},
+		UIReasoningStartPart{ID: "r_1"},
+		UIReasoningDeltaPart{ID: "r_1", Delta: "hmm"},
+		UIReasoningEndPart{ID: "r_1"},
+		UIToolInputStartPart{ToolCallID: "c_1", ToolName: "search"},
+		UIToolInputDeltaPart{ToolCallID: "c_1", InputTextDelta: `{"q":`},
+		UIToolInputAvailablePart{ToolCallID: "c_1", ToolName: "search", Input: map[string]any{"q": "x"}},
+		UIToolOutputAvailablePart{ToolCallID: "c_1", Output: map[string]any{"r": "y"}},
+		UISourceURLPart{SourceID: "s_1", URL: "https://example.com", Title: "Ex"},
+		UIFilePart{URL: "https://s3.example.com/f.pdf", MediaType: "application/pdf"},
+		UIFinishStepPart{},
+		UIFinishPart{FinishReason: FinishReasonStop},
+		UIErrorPart{ErrorText: "rate limited"},
+	}
+
+	for _, part := range parts {
+		typeName := part.UIStreamType()
+		t.Run(typeName, func(t *testing.T) {
+			allowed, ok := allowedKeys[typeName]
+			require.True(t, ok, "no allowed-keys entry for type %q — add it to the contract", typeName)
+
+			data, err := part.UIStreamJSON()
+			require.NoError(t, err)
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal(data, &parsed), "invalid JSON: %s", string(data))
+
+			allowedSet := make(map[string]bool, len(allowed))
+			for _, k := range allowed {
+				allowedSet[k] = true
+			}
+
+			for key := range parsed {
+				assert.True(t, allowedSet[key],
+					"type %q emitted disallowed key %q — the AI SDK v6 strictObject() will reject this. JSON: %s",
+					typeName, key, string(data))
+			}
+		})
+	}
+}
+
+// TestV6DataEventKeys verifies that custom data-* events use ONLY
+// the allowed keys: type, id, data, transient.
+func TestV6DataEventKeys(t *testing.T) {
+	events := []UIDataPart{
+		{DataType: "data-step-timing", Data: map[string]any{"id": "r_1", "startedMs": 100}, Transient: true},
+		{DataType: "data-context-usage", Data: map[string]any{"tokens": 1000, "limit": 128000, "ratio": 0.0078}, Transient: true},
+		{DataType: "data-persisted", Data: map[string]any{"messageId": "msg_1"}, Transient: true},
+		{DataType: "data-step-headline", ID: "r_1", Data: map[string]any{"blockId": "r_1", "headline": "Analyzing"}, Transient: true},
+	}
+
+	allowedKeys := map[string]bool{"type": true, "id": true, "data": true, "transient": true}
+
+	for _, ev := range events {
+		t.Run(ev.DataType, func(t *testing.T) {
+			data, err := ev.UIStreamJSON()
+			require.NoError(t, err)
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal(data, &parsed))
+
+			for key := range parsed {
+				assert.True(t, allowedKeys[key],
+					"data event %q emitted disallowed key %q — only type/id/data/transient allowed. JSON: %s",
+					ev.DataType, key, string(data))
+			}
+		})
+	}
 }
 
 func ptr[T any](v T) *T {
