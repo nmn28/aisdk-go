@@ -481,10 +481,11 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 
 					// SDK streaming reconstruction sometimes leaves Name empty
 					// (known bug: anthropic-sdk-python#954, litellm#17254).
+					// Default to "web_search" — currently the only Anthropic server tool.
 					serverToolName := string(block.Name)
 					if serverToolName == "" {
-						log.Printf("[aisdk-go] ServerToolUseBlock with empty name (id=%s)", block.ID)
-						serverToolName = "unknown_server_tool"
+						log.Printf("[aisdk-go] ServerToolUseBlock with empty name (id=%s), defaulting to web_search", block.ID)
+						serverToolName = "web_search"
 					}
 
 					if !yield(ToolCallStartStreamPart{
