@@ -181,6 +181,7 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 		var lastChunk *openai.ChatCompletionChunk
 		var usageChunk *openai.ChatCompletionChunk
 		var currentToolCallID string
+		var inlineFinishReason FinishReason // tracks finish reason from inline chunks
 
 		if stream.Err() != nil {
 			if !yield(ErrorStreamPart{Content: stream.Err().Error()}, nil) {
@@ -258,6 +259,7 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 				default:
 					finishReason = FinishReasonStop
 				}
+				inlineFinishReason = finishReason
 				if !yield(FinishStepStreamPart{
 					IsContinued:  false,
 					FinishReason: finishReason,
@@ -287,6 +289,10 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 			default:
 				finishReason = FinishReasonStop
 			}
+		} else if inlineFinishReason != "" {
+			// Usage-only final chunk has empty choices — use the finish reason
+			// captured from the last content chunk (e.g. xAI sends usage separately).
+			finishReason = inlineFinishReason
 		}
 
 		// Usage may be in the last content chunk OR in a separate empty-choices chunk
