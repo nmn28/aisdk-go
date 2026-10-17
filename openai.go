@@ -267,6 +267,14 @@ func OpenAIToDataStream(stream *ssestream.Stream[openai.ChatCompletionChunk]) Da
 			}
 		}
 
+		// Check for stream errors that caused the loop to exit early.
+		// Without this, mid-stream failures (connection reset, parse errors)
+		// are silently swallowed and replaced with a bare FinishMessage.
+		if stream.Err() != nil {
+			yield(ErrorStreamPart{Content: stream.Err().Error()}, nil)
+			return
+		}
+
 		var finishReason FinishReason
 		var promptTokens, completionTokens, cacheReadTokens *int64
 

@@ -183,7 +183,8 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 						Args: argsMap,
 					}
 					content.Parts = append(content.Parts, &genai.Part{
-						FunctionCall: &fc,
+						FunctionCall:     &fc,
+						ThoughtSignature: part.ToolInvocation.ThoughtSignature,
 					})
 
 					if part.ToolInvocation.State != ToolInvocationStateResult {
@@ -280,10 +281,11 @@ func GoogleToDataStream(stream iter.Seq2[*genai.GenerateContentResponse, error])
 					// We translate this into start and delta parts for the generic stream.
 					toolCallID := uuid.New().String()
 
-					// Emit start part ('b')
+					// Emit start part ('b') — carry Gemini's thought_signature for round-trip
 					if !yield(ToolCallStartStreamPart{
-						ToolCallID: toolCallID,
-						ToolName:   fc.Name,
+						ToolCallID:       toolCallID,
+						ToolName:         fc.Name,
+						ThoughtSignature: part.ThoughtSignature,
 					}, nil) {
 						return
 					}

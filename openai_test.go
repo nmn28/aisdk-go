@@ -131,6 +131,71 @@ data: [DONE]`
 	require.Equal(t, `{"message":"Message printed to the console"}`, toolMsg.Content.OfArrayOfContentParts[0].Text)
 }
 
+func TestOpenAIToDataStream_MidStreamError(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a stream that sends one text chunk then errors (connection reset).
+	// Before the fix, OpenAIToDataStream silently swallowed the error and emitted
+	// a bare FinishMessageStreamPart with zero usage.
+	mockResponse := `data: {"id":"chatcmpl-err","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+`
+	// Create a reader that yields the first chunk then returns an error
+	r := &errorAfterReader{
+		data: []byte(mockResponse),
+	}
+	mockHTTPResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(r),
+	}
+	decoder := ssestream.NewDecoder(mockHTTPResp)
+	typedStream := ssestream.NewStream[openai.ChatCompletionChunk](decoder, nil)
+
+	stream := aisdk.OpenAIToDataStream(typedStream)
+
+	var parts []aisdk.DataStreamPart
+	var gotError bool
+	for part, err := range stream {
+		if err != nil {
+			gotError = true
+			break
+		}
+		parts = append(parts, part)
+	}
+
+	// We should get the text part, then an ErrorStreamPart (not a bare FinishMessage)
+	hasText := false
+	hasErrorPart := false
+	for _, p := range parts {
+		switch p.(type) {
+		case aisdk.TextStreamPart:
+			hasText = true
+		case aisdk.ErrorStreamPart:
+			hasErrorPart = true
+		}
+	}
+
+	require.True(t, hasText || gotError, "should have received at least the first text chunk or error")
+	// The key assertion: mid-stream errors must surface, not be swallowed
+	require.True(t, hasErrorPart || gotError, "mid-stream error must be surfaced, not swallowed into a bare FinishMessage")
+}
+
+// errorAfterReader returns data once, then returns an error on subsequent reads
+// to simulate a connection reset mid-stream.
+type errorAfterReader struct {
+	data     []byte
+	consumed bool
+}
+
+func (r *errorAfterReader) Read(p []byte) (int, error) {
+	if !r.consumed {
+		r.consumed = true
+		n := copy(p, r.data)
+		return n, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
 func TestMessagesToOpenAI_Live(t *testing.T) {
 	t.Parallel()
 	apiKey := os.Getenv("OPENAI_API_KEY")

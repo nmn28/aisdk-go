@@ -342,9 +342,10 @@ type ToolCallResult interface {
 
 // ToolCallStartStreamPart corresponds to TYPE_ID 'b'.
 type ToolCallStartStreamPart struct {
-	ToolCallID   string `json:"toolCallId"`
-	ToolName     string `json:"toolName"`
-	IsServerTool bool   `json:"isServerTool,omitempty"` // True for Anthropic server tools (web_search)
+	ToolCallID       string `json:"toolCallId"`
+	ToolName         string `json:"toolName"`
+	IsServerTool     bool   `json:"isServerTool,omitempty"` // True for Anthropic server tools (web_search)
+	ThoughtSignature []byte `json:"thoughtSignature,omitempty"` // Gemini 3.x reasoning signature
 }
 
 func (p ToolCallStartStreamPart) TypeID() byte { return 'b' }
@@ -604,6 +605,10 @@ type ToolInvocation struct {
 	ToolName   string              `json:"toolName"`
 	Args       any                 `json:"args"`
 	Result     any                 `json:"result,omitempty"`
+
+	// ThoughtSignature preserves Gemini 3.x's opaque reasoning signature.
+	// Must be sent back unchanged with the FunctionCall part on the next turn.
+	ThoughtSignature []byte `json:"thoughtSignature,omitempty"`
 }
 
 func WriteDataStreamHeaders(w http.ResponseWriter) {
@@ -772,10 +777,11 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 		newPart := Part{
 			Type: PartTypeToolInvocation,
 			ToolInvocation: &ToolInvocation{
-				State:      ToolInvocationStatePartialCall,
-				ToolCallID: p.ToolCallID,
-				ToolName:   p.ToolName,
-				Args:       "",
+				State:            ToolInvocationStatePartialCall,
+				ToolCallID:       p.ToolCallID,
+				ToolName:         p.ToolName,
+				Args:             "",
+				ThoughtSignature: p.ThoughtSignature,
 			},
 			StartedMs:  time.Now().UnixMilli(),
 			isComplete: false,

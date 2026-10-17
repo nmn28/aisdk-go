@@ -96,6 +96,75 @@ data: {"candidates": [{"content": {"parts": [{"text": "ガイモ (jagaimo)\nRuss
 	require.Equal(t, expectedContent, content.Parts[0].Text)
 }
 
+func TestGoogleThoughtSignatureRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a Gemini response with a function call carrying a thought_signature.
+	sig := []byte("opaque-gemini-signature-abc123")
+	responses := []*genai.GenerateContentResponse{
+		{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							Name: "web_search",
+							Args: map[string]any{"query": "biotech news"},
+						},
+						ThoughtSignature: sig,
+					}},
+				},
+			}},
+		},
+	}
+
+	mockStream := func(yield func(*genai.GenerateContentResponse, error) bool) {
+		for _, resp := range responses {
+			if !yield(resp, nil) {
+				return
+			}
+		}
+	}
+
+	// Run through the stream + accumulator
+	var acc aisdk.DataStreamAccumulator
+	stream := aisdk.GoogleToDataStream(mockStream)
+	stream = stream.WithToolCalling(func(toolCall aisdk.ToolCall) any {
+		return map[string]any{"results": []string{"result1"}}
+	})
+	stream = stream.WithAccumulator(&acc)
+	for _, err := range stream {
+		require.NoError(t, err)
+	}
+
+	// Verify the accumulated ToolInvocation carries the signature
+	msgs := acc.Messages()
+	require.GreaterOrEqual(t, len(msgs), 1)
+	var foundSig []byte
+	for _, msg := range msgs {
+		for _, part := range msg.Parts {
+			if part.ToolInvocation != nil && part.ToolInvocation.ToolName == "web_search" {
+				foundSig = part.ToolInvocation.ThoughtSignature
+			}
+		}
+	}
+	require.Equal(t, sig, foundSig, "thought_signature must survive stream → accumulator")
+
+	// Convert back to Google format and verify the signature is forwarded
+	googleContents, err := aisdk.MessagesToGoogle(msgs)
+	require.NoError(t, err)
+
+	var foundPartSig []byte
+	for _, content := range googleContents {
+		for _, part := range content.Parts {
+			if part.FunctionCall != nil && part.FunctionCall.Name == "web_search" {
+				foundPartSig = part.ThoughtSignature
+			}
+		}
+	}
+	require.Equal(t, sig, foundPartSig, "thought_signature must round-trip through MessagesToGoogle")
+}
+
 func TestMessagesToGoogle_Live(t *testing.T) {
 	t.Parallel()
 	apiKey := os.Getenv("GOOGLE_API_KEY")
