@@ -696,3 +696,196 @@ func TestCacheControlToolLoopMax4(t *testing.T) {
 		}
 	}
 }
+
+// TestToolSearchStreamAndRoundTrip verifies that tool_search_tool_result blocks
+// are parsed from the stream, accumulated into Parts, and survive the
+// MessagesToAnthropic round-trip for multi-turn conversations.
+func TestToolSearchStreamAndRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Simulated Anthropic stream: server_tool_use (tool search) → tool_search_tool_result → tool_use (discovered tool)
+	toolSearchStream := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_ts01","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":200,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me search for a weather tool."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_search01","name":"tool_search_tool_bm25","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"weather\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_search01","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"get_weather"},{"type":"tool_reference","tool_name":"get_forecast"}]}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: content_block_start
+data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"I found weather tools. Let me get the weather."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":3}
+
+event: content_block_start
+data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"toolu_weather01","name":"get_weather","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"San Francisco\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":4}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":80}}
+
+event: message_stop
+data: {"type":"message_stop"}`
+
+	decoder := ssestream.NewDecoder(&http.Response{
+		Body: io.NopCloser(strings.NewReader(toolSearchStream)),
+	})
+	typedStream := ssestream.NewStream[anthropic.MessageStreamEventUnion](decoder, nil)
+
+	var parts []aisdk.DataStreamPart
+	var acc aisdk.DataStreamAccumulator
+	stream := aisdk.AnthropicToDataStream(typedStream)
+	stream = stream.WithToolCalling(func(toolCall aisdk.ToolCall) any {
+		return map[string]any{"temperature": "72F", "condition": "sunny"}
+	})
+	stream = stream.WithAccumulator(&acc)
+	for part, err := range stream {
+		require.NoError(t, err)
+		parts = append(parts, part)
+	}
+
+	// Verify: ToolSearchResultStreamPart should be present with 2 references
+	var foundSearchResult bool
+	for _, part := range parts {
+		if ts, ok := part.(aisdk.ToolSearchResultStreamPart); ok {
+			foundSearchResult = true
+			require.Equal(t, "srvtoolu_search01", ts.ToolCallID)
+			require.Len(t, ts.References, 2)
+			require.Equal(t, "get_weather", ts.References[0].ToolName)
+			require.Equal(t, "get_forecast", ts.References[1].ToolName)
+			require.Empty(t, ts.Error)
+		}
+	}
+	require.True(t, foundSearchResult, "expected ToolSearchResultStreamPart")
+
+	// Verify: the discovered tool (get_weather) should have been called
+	var foundToolCall bool
+	for _, part := range parts {
+		if tc, ok := part.(aisdk.ToolCallStreamPart); ok && !tc.IsServerTool {
+			foundToolCall = true
+			require.Equal(t, "get_weather", tc.ToolName)
+		}
+	}
+	require.True(t, foundToolCall, "expected ToolCallStreamPart for discovered tool")
+
+	// Verify accumulator captured the tool search result part
+	msgs := acc.Messages()
+	require.Len(t, msgs, 1)
+	msg := msgs[0]
+
+	var foundTSPart bool
+	for _, p := range msg.Parts {
+		if p.Type == aisdk.PartTypeToolSearchResult {
+			foundTSPart = true
+			require.Equal(t, "srvtoolu_search01", p.ToolSearchToolUseID)
+			require.Len(t, p.ToolSearchReferences, 2)
+			require.Equal(t, "get_weather", p.ToolSearchReferences[0].ToolName)
+		}
+	}
+	require.True(t, foundTSPart, "expected tool-search-result Part in accumulated message")
+
+	// ---- ROUND-TRIP: MessagesToAnthropic should preserve the tool_search_tool_result ----
+	anthropicMsgs, _, err := aisdk.MessagesToAnthropic(msgs)
+	require.NoError(t, err)
+
+	// Should have: assistant message (text + server_tool_use + tool_search_tool_result + text + tool_use)
+	// then user message (tool_result for get_weather)
+	require.GreaterOrEqual(t, len(anthropicMsgs), 2, "expected at least assistant + user messages")
+
+	// Find the tool_search_tool_result block in assistant content
+	var foundTSBlock bool
+	for _, msg := range anthropicMsgs {
+		for _, block := range msg.Content {
+			if block.OfToolSearchToolResult != nil {
+				foundTSBlock = true
+				require.Equal(t, "srvtoolu_search01", block.OfToolSearchToolResult.ToolUseID)
+				// Verify tool references are preserved
+				refs := block.OfToolSearchToolResult.Content.OfRequestToolSearchToolSearchResultBlock
+				require.NotNil(t, refs)
+				require.Len(t, refs.ToolReferences, 2)
+				require.Equal(t, "get_weather", refs.ToolReferences[0].ToolName)
+				require.Equal(t, "get_forecast", refs.ToolReferences[1].ToolName)
+			}
+		}
+	}
+	require.True(t, foundTSBlock, "round-trip must preserve tool_search_tool_result block")
+
+	t.Log("PASS: Tool search results survive stream → accumulator → MessagesToAnthropic round-trip")
+}
+
+// TestToolsToAnthropicDeferLoading verifies that DeferLoading is passed through
+// and cache_control goes on the last non-deferred tool.
+func TestToolsToAnthropicDeferLoading(t *testing.T) {
+	t.Parallel()
+
+	tools := []aisdk.Tool{
+		{Name: "core_tool", Description: "always loaded", Schema: aisdk.Schema{}},
+		{Name: "deferred_a", Description: "lazy loaded", Schema: aisdk.Schema{}, DeferLoading: true},
+		{Name: "deferred_b", Description: "lazy loaded", Schema: aisdk.Schema{}, DeferLoading: true},
+	}
+
+	anthropicTools := aisdk.ToolsToAnthropic(tools)
+	require.Len(t, anthropicTools, 3)
+
+	// First tool: non-deferred, should have cache_control (it's the last non-deferred)
+	require.NotNil(t, anthropicTools[0].OfTool)
+	require.Equal(t, "core_tool", anthropicTools[0].OfTool.Name)
+	require.NotEmpty(t, anthropicTools[0].OfTool.CacheControl.Type, "last non-deferred tool should have cache_control")
+	require.False(t, anthropicTools[0].OfTool.DeferLoading.Value, "core_tool should not be deferred")
+
+	// Second tool: deferred, no cache_control
+	require.NotNil(t, anthropicTools[1].OfTool)
+	require.Equal(t, "deferred_a", anthropicTools[1].OfTool.Name)
+	require.True(t, anthropicTools[1].OfTool.DeferLoading.Value, "deferred_a should be deferred")
+	require.Empty(t, anthropicTools[1].OfTool.CacheControl.Type, "deferred tool should not have cache_control")
+
+	// Third tool: deferred, no cache_control
+	require.NotNil(t, anthropicTools[2].OfTool)
+	require.True(t, anthropicTools[2].OfTool.DeferLoading.Value, "deferred_b should be deferred")
+	require.Empty(t, anthropicTools[2].OfTool.CacheControl.Type, "deferred tool should not have cache_control")
+}
+
+// TestServerToolsToAnthropicToolSearch verifies that tool search server tool types
+// are correctly converted.
+func TestServerToolsToAnthropicToolSearch(t *testing.T) {
+	t.Parallel()
+
+	serverTools := []aisdk.ServerTool{
+		{Type: "tool_search_tool_bm25_20251119", Name: "tool_search_tool_bm25"},
+		{Type: "tool_search_tool_regex_20251119", Name: "tool_search_tool_regex"},
+	}
+
+	anthropicTools := aisdk.ServerToolsToAnthropic(serverTools)
+	require.Len(t, anthropicTools, 2)
+
+	require.NotNil(t, anthropicTools[0].OfToolSearchToolBm25_20251119)
+	require.NotNil(t, anthropicTools[1].OfToolSearchToolRegex20251119)
+}

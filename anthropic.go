@@ -16,6 +16,17 @@ import (
 // can cache the tool definitions across requests (prompt caching).
 func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
 	anthropicTools := make([]anthropic.ToolUnionParam, 0, len(tools))
+
+	// Find last non-deferred tool index for cache breakpoint.
+	// Deferred tools cannot carry cache_control (API returns 400).
+	lastNonDeferred := -1
+	for i := len(tools) - 1; i >= 0; i-- {
+		if !tools[i].DeferLoading {
+			lastNonDeferred = i
+			break
+		}
+	}
+
 	for i, tool := range tools {
 		properties := tool.Schema.Properties
 		if properties == nil {
@@ -36,8 +47,10 @@ func ToolsToAnthropic(tools []Tool) []anthropic.ToolUnionParam {
 			Description: anthropic.String(tool.Description),
 			InputSchema: inputSchema,
 		}
-		// Set cache breakpoint on the last tool for prompt caching
-		if i == len(tools)-1 {
+		if tool.DeferLoading {
+			tp.DeferLoading = anthropic.Bool(true)
+		}
+		if i == lastNonDeferred {
 			tp.CacheControl = anthropic.NewCacheControlEphemeralParam()
 		}
 
@@ -74,6 +87,20 @@ func ServerToolsToAnthropic(serverTools []ServerTool) []anthropic.ToolUnionParam
 			}
 			anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
 				OfWebSearchTool20250305: param,
+			})
+
+		case "tool_search_tool_bm25_20251119":
+			anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
+				OfToolSearchToolBm25_20251119: &anthropic.ToolSearchToolBm25_20251119Param{
+					Type: anthropic.ToolSearchToolBm25_20251119TypeToolSearchToolBm25_20251119,
+				},
+			})
+
+		case "tool_search_tool_regex_20251119":
+			anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
+				OfToolSearchToolRegex20251119: &anthropic.ToolSearchToolRegex20251119Param{
+					Type: anthropic.ToolSearchToolRegex20251119TypeToolSearchToolRegex20251119,
+				},
 			})
 		}
 	}
@@ -273,6 +300,39 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 						},
 					})
 
+				case PartTypeToolSearchResult:
+					// Round-trip tool_search_tool_result blocks for multi-turn
+					if part.ToolSearchError != "" {
+						content = append(content, anthropic.ContentBlockParamUnion{
+							OfToolSearchToolResult: &anthropic.ToolSearchToolResultBlockParam{
+								ToolUseID: part.ToolSearchToolUseID,
+								Content: anthropic.ToolSearchToolResultBlockParamContentUnion{
+									OfRequestToolSearchToolResultError: &anthropic.ToolSearchToolResultErrorParam{
+										ErrorCode:    anthropic.ToolSearchToolResultErrorCode(part.ToolSearchError),
+										ErrorMessage: anthropic.Opt(part.ToolSearchErrorMsg),
+									},
+								},
+							},
+						})
+					} else {
+						refs := make([]anthropic.ToolReferenceBlockParam, len(part.ToolSearchReferences))
+						for i, ref := range part.ToolSearchReferences {
+							refs[i] = anthropic.ToolReferenceBlockParam{
+								ToolName: ref.ToolName,
+							}
+						}
+						content = append(content, anthropic.ContentBlockParamUnion{
+							OfToolSearchToolResult: &anthropic.ToolSearchToolResultBlockParam{
+								ToolUseID: part.ToolSearchToolUseID,
+								Content: anthropic.ToolSearchToolResultBlockParamContentUnion{
+									OfRequestToolSearchToolSearchResultBlock: &anthropic.ToolSearchToolSearchResultBlockParam{
+										ToolReferences: refs,
+									},
+								},
+							},
+						})
+					}
+
 				case PartTypeWebSearchResult:
 					// Round-trip web_search_tool_result blocks with encrypted content
 					if part.WebSearchError != "" {
@@ -381,6 +441,7 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 		var finalUsage Usage
 		var currentToolCall struct {
 			ID           string
+			Name         string
 			Args         string
 			IsServerTool bool
 		}
@@ -462,6 +523,7 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 				switch block := event.ContentBlock.AsAny().(type) {
 				case anthropic.ToolUseBlock:
 					currentToolCall.ID = block.ID
+					currentToolCall.Name = block.Name
 					currentToolCall.Args = ""
 					currentToolCall.IsServerTool = false
 
@@ -473,20 +535,22 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					}
 
 				case anthropic.ServerToolUseBlock:
-					// Server-side tool invocation (e.g., web_search)
+					// Server-side tool invocation (e.g., web_search, tool_search_tool_bm25)
 					currentToolCall.ID = block.ID
+					currentToolCall.Name = ""
 					currentToolCall.Args = ""
 					currentToolCall.IsServerTool = true
 					serverToolIDs[block.ID] = true
 
 					// SDK streaming reconstruction sometimes leaves Name empty
 					// (known bug: anthropic-sdk-python#954, litellm#17254).
-					// Default to "web_search" — currently the only Anthropic server tool.
+					// Default to "web_search" only when name is truly empty.
 					serverToolName := string(block.Name)
 					if serverToolName == "" {
 						log.Printf("[aisdk-go] ServerToolUseBlock with empty name (id=%s), defaulting to web_search", block.ID)
 						serverToolName = "web_search"
 					}
+					currentToolCall.Name = serverToolName
 
 					if !yield(ToolCallStartStreamPart{
 						ToolCallID:   block.ID,
@@ -539,6 +603,34 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 							}
 						}
 					}
+
+				case anthropic.ToolSearchToolResultBlock:
+					// Server-side tool search results — arrives as a single block
+					searchResult := block.Content.AsResponseToolSearchToolSearchResultBlock()
+					if len(searchResult.ToolReferences) > 0 {
+						refs := make([]ToolSearchReference, len(searchResult.ToolReferences))
+						for i, ref := range searchResult.ToolReferences {
+							refs[i] = ToolSearchReference{ToolName: ref.ToolName}
+						}
+						if !yield(ToolSearchResultStreamPart{
+							ToolCallID: block.ToolUseID,
+							References: refs,
+						}, nil) {
+							return
+						}
+					} else {
+						// Check for error
+						errResult := block.Content.AsResponseToolSearchToolResultError()
+						if string(errResult.ErrorCode) != "" {
+							if !yield(ToolSearchResultStreamPart{
+								ToolCallID: block.ToolUseID,
+								Error:      string(errResult.ErrorCode),
+								ErrorMsg:   errResult.ErrorMessage,
+							}, nil) {
+								return
+							}
+						}
+					}
 				}
 
 			case anthropic.ContentBlockStopEvent:
@@ -549,7 +641,7 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 					if json.Unmarshal([]byte(currentToolCall.Args), &args) == nil {
 						if !yield(ToolCallStreamPart{
 							ToolCallID:   currentToolCall.ID,
-							ToolName:     "web_search",
+							ToolName:     currentToolCall.Name,
 							Args:         args,
 							IsServerTool: true,
 						}, nil) {
@@ -573,6 +665,7 @@ func AnthropicToDataStream(stream *ssestream.Stream[anthropic.MessageStreamEvent
 				// Reset current tool call
 				currentToolCall = struct {
 					ID           string
+					Name         string
 					Args         string
 					IsServerTool bool
 				}{}

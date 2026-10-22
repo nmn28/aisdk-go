@@ -112,6 +112,10 @@ func (s DataStream) WithToolCalling(handleToolCall func(toolCall ToolCall) any) 
 				}
 
 			case ToolCallStreamPart:
+				// Skip server tool calls — they are handled by the API
+				if p.IsServerTool {
+					continue
+				}
 				if !processToolCall(p.ToolCallID, p.ToolName, p.Args) {
 					return
 				}
@@ -475,9 +479,10 @@ const (
 	PartTypeToolInvocation    PartType = "tool-invocation"
 	PartTypeSource            PartType = "source"
 	PartTypeFile              PartType = "file"
-	PartTypeStepStart         PartType = "step-start"
-	PartTypeServerToolUse     PartType = "server-tool-use"
-	PartTypeWebSearchResult   PartType = "web-search-result"
+	PartTypeStepStart          PartType = "step-start"
+	PartTypeServerToolUse      PartType = "server-tool-use"
+	PartTypeWebSearchResult    PartType = "web-search-result"
+	PartTypeToolSearchResult   PartType = "tool-search-result"
 )
 
 type ReasoningDetail struct {
@@ -530,6 +535,12 @@ type Part struct {
 	WebSearchError     string              `json:"webSearchError,omitempty"`
 	RawContentJSON     string              `json:"-"` // Preserves encrypted_content for multi-turn round-trip
 
+	// Type: "tool-search-result" — Results from Anthropic tool search
+	ToolSearchToolUseID  string                `json:"toolSearchToolUseId,omitempty"`
+	ToolSearchReferences []ToolSearchReference `json:"toolSearchReferences,omitempty"`
+	ToolSearchError      string                `json:"toolSearchError,omitempty"`
+	ToolSearchErrorMsg   string                `json:"toolSearchErrorMsg,omitempty"`
+
 	// CacheControl signals the Anthropic adapter to set cache_control: ephemeral on this block.
 	CacheControl bool `json:"-"`
 
@@ -542,6 +553,25 @@ type Part struct {
 	isComplete bool `json:"-"` // Internal accumulator tracking
 }
 
+// ToolSearchReference represents a tool discovered by Anthropic's tool search.
+type ToolSearchReference struct {
+	ToolName string `json:"tool_name"`
+}
+
+// ToolSearchResultStreamPart is emitted when Anthropic's server-side tool search returns results.
+// This is an Endure extension, TYPE_ID 'x' (custom).
+type ToolSearchResultStreamPart struct {
+	ToolCallID string                `json:"toolCallId"`
+	References []ToolSearchReference `json:"references,omitempty"`
+	Error      string                `json:"error,omitempty"`
+	ErrorMsg   string                `json:"errorMsg,omitempty"`
+}
+
+func (p ToolSearchResultStreamPart) TypeID() byte { return 'x' }
+func (p ToolSearchResultStreamPart) Format() (string, error) {
+	return formatJSONPart(p)
+}
+
 // WebSearchResult represents a single search result from Anthropic's native web search.
 type WebSearchResult struct {
 	URL              string `json:"url"`
@@ -551,9 +581,10 @@ type WebSearchResult struct {
 }
 
 type Tool struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Schema      Schema `json:"parameters"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Schema       Schema `json:"parameters"`
+	DeferLoading bool   `json:"defer_loading,omitempty"` // Anthropic tool search: defer loading into context
 }
 
 // ServerTool defines an Anthropic server-side tool (e.g., web_search).
@@ -911,6 +942,19 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 	case ErrorStreamPart:
 		a.finishReason = FinishReasonError
 		return fmt.Errorf("error in stream: %s", p.Content)
+
+	case ToolSearchResultStreamPart:
+		if currentMsgPtr == nil {
+			return fmt.Errorf("cannot add ToolSearchResultStreamPart without an active message")
+		}
+		part := Part{
+			Type:                 PartTypeToolSearchResult,
+			ToolSearchToolUseID:  p.ToolCallID,
+			ToolSearchReferences: p.References,
+			ToolSearchError:      p.Error,
+			ToolSearchErrorMsg:   p.ErrorMsg,
+		}
+		currentMsgPtr.Parts = append(currentMsgPtr.Parts, part)
 
 	case WebSearchResultStreamPart:
 		if currentMsgPtr == nil {
