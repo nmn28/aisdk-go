@@ -534,6 +534,10 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 				}
 
 			case ToolCallStartStreamPart:
+				if p.IsServerTool {
+					// Server tools (web_search, tool_search) are API-side — don't render in UI
+					continue
+				}
 				if !closeAllBlocks() {
 					return
 				}
@@ -553,6 +557,10 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 				}
 
 			case ToolCallStreamPart:
+				if p.IsServerTool {
+					// Server tools (web_search, tool_search) are API-side — don't render in UI
+					continue
+				}
 				if !closeAllBlocks() {
 					return
 				}
