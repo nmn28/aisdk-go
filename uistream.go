@@ -6,6 +6,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -534,8 +535,9 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 				}
 
 			case ToolCallStartStreamPart:
-				if p.IsServerTool {
-					// Server tools (web_search, tool_search) are API-side — don't render in UI
+				if p.IsServerTool && strings.HasPrefix(p.ToolName, "tool_search_tool") {
+					// Tool search is API-internal — don't render in UI.
+					// Other server tools (web_search) keep their UI row.
 					continue
 				}
 				if !closeAllBlocks() {
@@ -557,8 +559,9 @@ func DataStreamToUIMessageStream(ds DataStream, messageID string) UIMessageStrea
 				}
 
 			case ToolCallStreamPart:
-				if p.IsServerTool {
-					// Server tools (web_search, tool_search) are API-side — don't render in UI
+				if p.IsServerTool && strings.HasPrefix(p.ToolName, "tool_search_tool") {
+					// Tool search is API-internal — don't render in UI.
+					// Other server tools (web_search) keep their UI row.
 					continue
 				}
 				if !closeAllBlocks() {

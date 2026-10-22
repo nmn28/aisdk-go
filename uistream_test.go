@@ -297,6 +297,40 @@ func TestDataStreamToUIMessageStream_Error(t *testing.T) {
 	}, events)
 }
 
+// TestDataStreamToUIMessageStream_ServerToolFilter verifies that tool_search server
+// tools are hidden from the UI but web_search server tools still produce UI parts.
+func TestDataStreamToUIMessageStream_ServerToolFilter(t *testing.T) {
+	ds := DataStream(func(yield func(DataStreamPart, error) bool) {
+		// web_search server tool — should produce UI parts
+		yield(ToolCallStartStreamPart{ToolCallID: "ws_1", ToolName: "web_search", IsServerTool: true}, nil)
+		yield(ToolCallStreamPart{ToolCallID: "ws_1", ToolName: "web_search", Args: map[string]any{"query": "test"}, IsServerTool: true}, nil)
+		// tool_search_tool_bm25 server tool — should be hidden
+		yield(ToolCallStartStreamPart{ToolCallID: "ts_1", ToolName: "tool_search_tool_bm25", IsServerTool: true}, nil)
+		yield(ToolCallStreamPart{ToolCallID: "ts_1", ToolName: "tool_search_tool_bm25", Args: map[string]any{}, IsServerTool: true}, nil)
+		yield(TextStreamPart{Content: "Result"}, nil)
+		yield(FinishMessageStreamPart{FinishReason: FinishReasonStop}, nil)
+	})
+
+	var events []string
+	uiStream := DataStreamToUIMessageStream(ds, "msg_filter")
+	for part, err := range uiStream {
+		require.NoError(t, err)
+		events = append(events, part.UIStreamType())
+	}
+
+	assert.Equal(t, []string{
+		"start",
+		"tool-input-start",     // web_search start (kept)
+		"tool-input-available", // web_search available (kept)
+		// tool_search_tool_bm25 start + available are hidden
+		"text-start",
+		"text-delta", // "Result"
+		"text-end",
+		"finish",
+		"[DONE]",
+	}, events)
+}
+
 // TestWriteUIMessageStreamHeaders verifies required HTTP headers.
 func TestWriteUIMessageStreamHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
