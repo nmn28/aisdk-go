@@ -467,6 +467,14 @@ type Attachment struct {
 	// Bytes holds pre-fetched binary content for non-text attachments (populated by the server).
 	// When set, converters use this instead of parsing the URL.
 	Bytes []byte `json:"bytes,omitempty"`
+
+	// Kind classifies the attachment origin (e.g. "pasted_text", "file").
+	// Populated by the server so clients can render collapse chips on reload.
+	Kind string `json:"kind,omitempty"`
+	// Chars is the character count of the original text content (pasted_text only).
+	Chars int `json:"chars,omitempty"`
+	// Lines is the line count of the original text content (pasted_text only).
+	Lines int `json:"lines,omitempty"`
 }
 
 type Message struct {
