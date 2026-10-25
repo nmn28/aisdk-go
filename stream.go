@@ -1,11 +1,13 @@
 package aisdk
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"iter"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -459,6 +461,12 @@ type Attachment struct {
 	Name        string `json:"name,omitempty"`
 	ContentType string `json:"contentType,omitempty"`
 	URL         string `json:"url"`
+
+	// TextContent holds pre-fetched text for text/* attachments (populated by the server).
+	TextContent string `json:"textContent,omitempty"`
+	// Bytes holds pre-fetched binary content for non-text attachments (populated by the server).
+	// When set, converters use this instead of parsing the URL.
+	Bytes []byte `json:"bytes,omitempty"`
 }
 
 type Message struct {
@@ -1063,6 +1071,36 @@ func (a *DataStreamAccumulator) FinishReason() FinishReason {
 
 func (a *DataStreamAccumulator) Usage() Usage {
 	return a.usage
+}
+
+// attachmentBytes returns the binary content of an attachment.
+// Prefers the pre-fetched Bytes field; falls back to parsing a data-URI URL.
+func attachmentBytes(a Attachment) ([]byte, error) {
+	if len(a.Bytes) > 0 {
+		return a.Bytes, nil
+	}
+	parts := strings.SplitN(a.URL, ",", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("attachment has no Bytes and invalid data URI: %s", a.URL)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode attachment base64: %w", err)
+	}
+	return decoded, nil
+}
+
+// attachmentBase64 returns base64-encoded content for an attachment.
+// Prefers the pre-fetched Bytes field; falls back to parsing a data-URI URL.
+func attachmentBase64(a Attachment) (string, error) {
+	if len(a.Bytes) > 0 {
+		return base64.StdEncoding.EncodeToString(a.Bytes), nil
+	}
+	parts := strings.SplitN(a.URL, ",", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("attachment has no Bytes and invalid data URI: %s", a.URL)
+	}
+	return parts[1], nil
 }
 
 func toolResultToParts(result any) ([]Part, error) {

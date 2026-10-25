@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
@@ -404,21 +403,11 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 
 		if len(message.Attachments) > 0 {
 			for _, attachment := range message.Attachments {
-				// URLs typically have the mime prefixing as a URL.
-				parts := strings.SplitN(attachment.URL, ",", 2)
-				if len(parts) != 2 {
-					return nil, nil, fmt.Errorf("invalid attachment URL: %s", attachment.URL)
+				block, err := attachmentToAnthropicBlock(attachment)
+				if err != nil {
+					return nil, nil, err
 				}
-				content = append(content, anthropic.ContentBlockParamUnion{
-					OfImage: &anthropic.ImageBlockParam{
-						Source: anthropic.ImageBlockParamSourceUnion{
-							OfBase64: &anthropic.Base64ImageSourceParam{
-								Data:      parts[1],
-								MediaType: anthropic.Base64ImageSourceMediaType(attachment.ContentType),
-							},
-						},
-					},
-				})
+				content = append(content, block)
 			}
 		}
 		if len(content) > 0 {
@@ -431,6 +420,56 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 	}
 
 	return anthropicMessages, systemPrompt, nil
+}
+
+// attachmentToAnthropicBlock converts an Attachment to the appropriate Anthropic content block
+// based on ContentType. The server pre-fetches binary content into Bytes and text into TextContent.
+func attachmentToAnthropicBlock(a Attachment) (anthropic.ContentBlockParamUnion, error) {
+	ct := a.ContentType
+
+	switch {
+	case a.TextContent != "":
+		// Text attachment — wrap content with attachment name tag for context.
+		text := a.TextContent
+		if a.Name != "" {
+			text = "<attachment name=\"" + a.Name + "\">\n" + text + "\n</attachment>"
+		}
+		return anthropic.ContentBlockParamUnion{
+			OfText: &anthropic.TextBlockParam{Text: text},
+		}, nil
+
+	case ct == "application/pdf":
+		data, err := attachmentBytes(a)
+		if err != nil {
+			return anthropic.ContentBlockParamUnion{}, err
+		}
+		return anthropic.ContentBlockParamUnion{
+			OfDocument: &anthropic.DocumentBlockParam{
+				Source: anthropic.DocumentBlockParamSourceUnion{
+					OfBase64: &anthropic.Base64PDFSourceParam{
+						Data: base64.StdEncoding.EncodeToString(data),
+					},
+				},
+			},
+		}, nil
+
+	default:
+		// Default: treat as image (backward compatible).
+		data, err := attachmentBytes(a)
+		if err != nil {
+			return anthropic.ContentBlockParamUnion{}, err
+		}
+		return anthropic.ContentBlockParamUnion{
+			OfImage: &anthropic.ImageBlockParam{
+				Source: anthropic.ImageBlockParamSourceUnion{
+					OfBase64: &anthropic.Base64ImageSourceParam{
+						Data:      base64.StdEncoding.EncodeToString(data),
+						MediaType: anthropic.Base64ImageSourceMediaType(ct),
+					},
+				},
+			},
+		}, nil
+	}
 }
 
 // AnthropicToDataStream pipes an Anthropic stream to a DataStream.

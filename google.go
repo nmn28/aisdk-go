@@ -1,7 +1,6 @@
 package aisdk
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -144,18 +143,11 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 			}
 
 			for _, attachment := range message.Attachments {
-				parts := strings.SplitN(attachment.URL, ",", 2)
-				if len(parts) != 2 {
-					return nil, fmt.Errorf("invalid attachment URL: %s", attachment.URL)
-				}
-				decoded, err := base64.StdEncoding.DecodeString(parts[1])
+				gPart, err := attachmentToGooglePart(attachment)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode attachment: %w", err)
+					return nil, err
 				}
-				content.Parts = append(content.Parts, &genai.Part{InlineData: &genai.Blob{
-					Data:     decoded,
-					MIMEType: attachment.ContentType,
-				}})
+				content.Parts = append(content.Parts, gPart)
 			}
 
 			googleContents = append(googleContents, content)
@@ -234,6 +226,31 @@ func MessagesToGoogle(messages []Message) ([]*genai.Content, error) {
 	}
 
 	return googleContents, nil
+}
+
+// attachmentToGooglePart converts an Attachment to a Google genai Part.
+func attachmentToGooglePart(a Attachment) (*genai.Part, error) {
+	ct := a.ContentType
+
+	switch {
+	case a.TextContent != "":
+		text := a.TextContent
+		if a.Name != "" {
+			text = "[Attachment: " + a.Name + "]\n" + text
+		}
+		return &genai.Part{Text: text}, nil
+
+	default:
+		// PDF and image both use InlineData — Gemini handles the mime type natively.
+		data, err := attachmentBytes(a)
+		if err != nil {
+			return nil, err
+		}
+		return &genai.Part{InlineData: &genai.Blob{
+			Data:     data,
+			MIMEType: ct,
+		}}, nil
+	}
 }
 
 // GoogleToDataStream pipes a Google AI stream to a DataStream.

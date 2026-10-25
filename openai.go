@@ -76,13 +76,11 @@ func MessagesToOpenAI(messages []Message) ([]openai.ChatCompletionMessageParamUn
 			}
 
 			for _, attachment := range message.Attachments {
-				content = append(content, openai.ChatCompletionContentPartUnionParam{
-					OfImageURL: &openai.ChatCompletionContentPartImageParam{
-						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-							URL: attachment.URL,
-						},
-					},
-				})
+				block, err := attachmentToOpenAIChatBlock(attachment)
+				if err != nil {
+					return nil, err
+				}
+				content = append(content, block)
 			}
 
 			openaiMessages = append(openaiMessages, openai.ChatCompletionMessageParamUnion{
@@ -173,6 +171,50 @@ func MessagesToOpenAI(messages []Message) ([]openai.ChatCompletionMessageParamUn
 	}
 
 	return openaiMessages, nil
+}
+
+// attachmentToOpenAIChatBlock converts an Attachment to the appropriate OpenAI Chat content part.
+func attachmentToOpenAIChatBlock(a Attachment) (openai.ChatCompletionContentPartUnionParam, error) {
+	ct := a.ContentType
+
+	switch {
+	case a.TextContent != "":
+		text := a.TextContent
+		if a.Name != "" {
+			text = "[Attachment: " + a.Name + "]\n" + text
+		}
+		return openai.ChatCompletionContentPartUnionParam{
+			OfText: &openai.ChatCompletionContentPartTextParam{Text: text},
+		}, nil
+
+	case ct == "application/pdf":
+		b64, err := attachmentBase64(a)
+		if err != nil {
+			return openai.ChatCompletionContentPartUnionParam{}, err
+		}
+		return openai.ChatCompletionContentPartUnionParam{
+			OfFile: &openai.ChatCompletionContentPartFileParam{
+				File: openai.ChatCompletionContentPartFileFileParam{
+					FileData: param.NewOpt("data:application/pdf;base64," + b64),
+					Filename: param.NewOpt(a.Name),
+				},
+			},
+		}, nil
+
+	default:
+		// Default: treat as image (backward compatible).
+		url := a.URL
+		if len(a.Bytes) > 0 {
+			url = fmt.Sprintf("data:%s;base64,%s", ct, base64.StdEncoding.EncodeToString(a.Bytes))
+		}
+		return openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL: url,
+				},
+			},
+		}, nil
+	}
 }
 
 // OpenAIToDataStream pipes an OpenAI stream to a DataStream.

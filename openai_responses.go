@@ -1,6 +1,7 @@
 package aisdk
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -57,17 +58,44 @@ func MessagesToOpenAIResponses(messages []Message) (responses.ResponseInputParam
 			}
 
 		case "user":
-			for _, part := range parts {
-				switch part.Type {
-				case PartTypeText:
-					items = append(items, responses.ResponseInputItemUnionParam{
-						OfMessage: &responses.EasyInputMessageParam{
-							Role: responses.EasyInputMessageRoleUser,
-							Content: responses.EasyInputMessageContentUnionParam{
-								OfString: param.NewOpt(part.Text),
-							},
+			// If there are attachments or multiple parts, use the content list form.
+			if len(message.Attachments) > 0 {
+				var contentParts responses.ResponseInputMessageContentListParam
+				for _, part := range parts {
+					if part.Type == PartTypeText {
+						contentParts = append(contentParts, responses.ResponseInputContentUnionParam{
+							OfInputText: &responses.ResponseInputTextParam{Text: part.Text},
+						})
+					}
+				}
+				for _, attachment := range message.Attachments {
+					aPart, err := attachmentToOpenAIResponsesPart(attachment)
+					if err != nil {
+						return nil, "", err
+					}
+					contentParts = append(contentParts, aPart)
+				}
+				items = append(items, responses.ResponseInputItemUnionParam{
+					OfMessage: &responses.EasyInputMessageParam{
+						Role: responses.EasyInputMessageRoleUser,
+						Content: responses.EasyInputMessageContentUnionParam{
+							OfInputItemContentList: contentParts,
 						},
-					})
+					},
+				})
+			} else {
+				for _, part := range parts {
+					switch part.Type {
+					case PartTypeText:
+						items = append(items, responses.ResponseInputItemUnionParam{
+							OfMessage: &responses.EasyInputMessageParam{
+								Role: responses.EasyInputMessageRoleUser,
+								Content: responses.EasyInputMessageContentUnionParam{
+									OfString: param.NewOpt(part.Text),
+								},
+							},
+						})
+					}
 				}
 			}
 
@@ -115,6 +143,47 @@ func MessagesToOpenAIResponses(messages []Message) (responses.ResponseInputParam
 	}
 
 	return items, systemInstruction, nil
+}
+
+// attachmentToOpenAIResponsesPart converts an Attachment to an OpenAI Responses content part.
+func attachmentToOpenAIResponsesPart(a Attachment) (responses.ResponseInputContentUnionParam, error) {
+	ct := a.ContentType
+
+	switch {
+	case a.TextContent != "":
+		text := a.TextContent
+		if a.Name != "" {
+			text = "[Attachment: " + a.Name + "]\n" + text
+		}
+		return responses.ResponseInputContentUnionParam{
+			OfInputText: &responses.ResponseInputTextParam{Text: text},
+		}, nil
+
+	case ct == "application/pdf":
+		b64, err := attachmentBase64(a)
+		if err != nil {
+			return responses.ResponseInputContentUnionParam{}, err
+		}
+		return responses.ResponseInputContentUnionParam{
+			OfInputFile: &responses.ResponseInputFileParam{
+				FileData: param.NewOpt("data:application/pdf;base64," + b64),
+				Filename: param.NewOpt(a.Name),
+			},
+		}, nil
+
+	default:
+		// Default: treat as image.
+		url := a.URL
+		if len(a.Bytes) > 0 {
+			url = fmt.Sprintf("data:%s;base64,%s", ct, base64.StdEncoding.EncodeToString(a.Bytes))
+		}
+		return responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				ImageURL: param.NewOpt(url),
+				Detail:   responses.ResponseInputImageDetailAuto,
+			},
+		}, nil
+	}
 }
 
 // OpenAIResponsesToDataStream pipes an OpenAI Responses API stream to a DataStream.
