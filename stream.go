@@ -819,6 +819,19 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 			}
 			a.currentReasoningIdx = -1
 		}
+		// tool_search_tool_* server tools must be stored as PartTypeServerToolUse
+		// so MessagesToAnthropic round-trips them as server_tool_use blocks.
+		// Other server tools (web_search) stay as PartTypeToolInvocation because
+		// clients render them from that type in saved history.
+		if p.IsServerTool && strings.HasPrefix(p.ToolName, "tool_search_tool") {
+			newPart := Part{
+				Type:            PartTypeServerToolUse,
+				ServerToolUseID: p.ToolCallID,
+				ServerToolName:  p.ToolName,
+			}
+			currentMsgPtr.Parts = append(currentMsgPtr.Parts, newPart)
+			break
+		}
 		// Initialize a new tool call. Args starts as empty string for delta
 		// concatenation during streaming; converted to object before API replay.
 		newPart := Part{
@@ -852,6 +865,16 @@ func (a *DataStreamAccumulator) Push(part DataStreamPart) error {
 	case ToolCallStreamPart:
 		if currentMsgPtr == nil {
 			return fmt.Errorf("cannot add ToolCallStreamPart without an active message")
+		}
+		// tool_search_tool_* server tools: update existing ServerToolUse part or create one.
+		if p.IsServerTool && strings.HasPrefix(p.ToolName, "tool_search_tool") {
+			for i := range currentMsgPtr.Parts {
+				if currentMsgPtr.Parts[i].Type == PartTypeServerToolUse && currentMsgPtr.Parts[i].ServerToolUseID == p.ToolCallID {
+					currentMsgPtr.Parts[i].ServerToolInput = p.Args
+					break
+				}
+			}
+			break
 		}
 		// Update or create tool call
 		existingPart := a.findPart(p.ToolCallID)
