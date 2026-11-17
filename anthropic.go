@@ -291,10 +291,15 @@ func MessagesToAnthropic(messages []Message) ([]anthropic.MessageParam, []anthro
 
 				case PartTypeServerToolUse:
 					// Round-trip server_tool_use blocks for multi-turn
-					inputJSON, _ := json.Marshal(part.ServerToolInput)
+					serverInput := part.ServerToolInput
+					if serverInput == nil {
+						serverInput = map[string]any{}
+					}
+					inputJSON, _ := json.Marshal(serverInput)
 					content = append(content, anthropic.ContentBlockParamUnion{
 						OfServerToolUse: &anthropic.ServerToolUseBlockParam{
 							ID:    part.ServerToolUseID,
+							Name:  anthropic.ServerToolUseBlockParamName(part.ServerToolName),
 							Input: json.RawMessage(inputJSON),
 						},
 					})
